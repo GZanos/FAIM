@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import time
 import plotly.express as px
 import plotly.graph_objects as go
-from io import StringIO
+from io import StringIO, BytesIO
 import json
 import html as html_module
 from sklearn.linear_model import LinearRegression
@@ -1324,6 +1324,445 @@ Output **6–10** bullet lines starting with "- ". You MUST explicitly comment o
     return base
 
 
+def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target, future_dates):
+    """2-3 plain-language sentences for non-technical readers."""
+    if not forecast_results:
+        return ""
+    hist_mean = float(np.mean(y_hist)) if len(y_hist) else None
+    method_means = {m: float(np.mean(np.asarray(v, dtype=float))) for m, v in forecast_results.items()}
+    sorted_methods = sorted(method_means.items(), key=lambda kv: kv[1])
+    low_m, low_v = sorted_methods[0]
+    high_m, high_v = sorted_methods[-1]
+    span = high_v - low_v
+    if hist_mean is not None:
+        closest_m = min(method_means, key=lambda m: abs(method_means[m] - hist_mean))
+        dir_word = "above" if method_means[closest_m] >= hist_mean else "below"
+        s1 = (
+            f"Across models, expected {forecast_target} stays in a similar overall band, "
+            f"with {low_m} lowest and {high_m} highest on average."
+        )
+        s2 = (
+            f"The spread between models is moderate ({span:.2f} units), and {closest_m} tracks "
+            f"closest to recent historical conditions ({dir_word} the historical average)."
+        )
+    else:
+        s1 = (
+            f"Across models, expected {forecast_target} remains in a consistent range, "
+            f"from {low_m} (lower) to {high_m} (higher)."
+        )
+        s2 = f"Model-to-model spread is about {span:.2f} units, indicating moderate uncertainty."
+    if len(future_dates):
+        s3 = f"This outlook covers {len(future_dates)} days ({future_dates[0].strftime('%Y-%m-%d')} to {future_dates[-1].strftime('%Y-%m-%d')})."
+    else:
+        s3 = "The forecast horizon uses the user-selected future window."
+    return f"{s1}\n\n{s2}\n\n{s3}"
+
+
+def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, model_params):
+    """Compute fitted (in-sample) predictions for residual diagnostics."""
+    y_arr = np.asarray(y, dtype=float)
+    if method == "Linear Regression":
+        m = LinearRegression()
+        m.fit(X_scaled, y_arr)
+        return np.asarray(m.predict(X_scaled), dtype=float)
+    if method == "Random Forest":
+        mp = model_params.get("Random Forest") or {}
+        m = RandomForestRegressor(
+            n_estimators=mp.get("n_estimators", 100),
+            max_depth=mp.get("max_depth", 10),
+            min_samples_split=mp.get("min_samples_split", 2),
+            random_state=42,
+            n_jobs=-1,
+        )
+        m.fit(X_scaled, y_arr)
+        return np.asarray(m.predict(X_scaled), dtype=float)
+    if method == "Gradient Boosting":
+        mp = model_params.get("Gradient Boosting") or {}
+        m = GradientBoostingRegressor(
+            n_estimators=mp.get("n_estimators", 100),
+            max_depth=mp.get("max_depth", 5),
+            learning_rate=mp.get("learning_rate", 0.1),
+            random_state=42,
+        )
+        m.fit(X_scaled, y_arr)
+        return np.asarray(m.predict(X_scaled), dtype=float)
+    if method == "XGBoost":
+        import xgboost as xgb
+
+        mp = model_params.get("XGBoost") or {}
+        m = xgb.XGBRegressor(
+            n_estimators=mp.get("n_estimators", 100),
+            max_depth=mp.get("max_depth", 6),
+            learning_rate=mp.get("learning_rate", 0.1),
+            random_state=42,
+            n_jobs=-1,
+        )
+        m.fit(X_scaled, y_arr)
+        return np.asarray(m.predict(X_scaled), dtype=float)
+    if method == "FBLiR":
+        params = model_params.get("FBLiR") or {}
+        if FuzzyBayesianRegression is not None:
+            adapt = int(params.get("adapt_steps", 100))
+            burnin = int(params.get("burnin_steps", 100))
+            thinning = max(1, int(params.get("thinning_steps", 1)))
+            n_chains = max(1, int(params.get("N_chains", 1)))
+            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
+            m = FuzzyBayesianRegression(
+                n_samples=n_samples,
+                symmetry_threshold=params.get("symmetry_threshold", 0.5),
+                k=params.get("k", 0.5),
+                m=params.get("m", 0.1),
+                fuzzify_variance=params.get("fuzzification_factor", 0.05),
+                use_quadratic=True,
+                small_delta_threshold=params.get("symmetry_threshold", 0.4),
+            )
+            m.fit(X_scaled, y_arr)
+            return np.asarray(m.predict(X_scaled), dtype=float).ravel()
+        split_idx = int(len(X_scaled) * 0.8)
+        X_train_f = X_scaled.iloc[:split_idx]
+        y_train_f = pd.Series(y_arr).iloc[:split_idx]
+        X_val_f = X_scaled.iloc[split_idx:]
+        y_val_f = pd.Series(y_arr).iloc[split_idx:]
+        base_samples = min(max(100, int(params.get("adapt_steps", 100)) + int(params.get("burnin_steps", 100))), 1500)
+        m = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
+        m.fit(X_train_f, y_train_f, X_val_f, y_val_f)
+        return np.asarray(m.predict(X_scaled), dtype=float).ravel()
+    if method == "Prophet":
+        df_prophet = df_ml[["date", forecast_target]].copy()
+        df_prophet.columns = ["ds", "y"]
+        from prophet import Prophet
+
+        pp = model_params.get("Prophet") or {}
+        m = Prophet(
+            daily_seasonality=pp.get("daily_seasonality", True),
+            weekly_seasonality=pp.get("weekly_seasonality", True),
+            yearly_seasonality=pp.get("yearly_seasonality", True),
+            seasonality_mode=pp.get("seasonality_mode", "multiplicative"),
+        )
+        m.fit(df_prophet)
+        fitted = m.predict(df_prophet[["ds"]])["yhat"].values
+        return np.asarray(fitted, dtype=float)
+    if method == "SARIMA":
+        from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+        mp = model_params.get("SARIMA") or {}
+        m = SARIMAX(
+            y_arr,
+            order=mp.get("order", (1, 1, 1)),
+            seasonal_order=mp.get("seasonal_order", (1, 1, 1, 7)),
+            enforce_stationarity=False,
+            enforce_invertibility=False,
+        )
+        fit = m.fit(disp=False)
+        fitted = np.asarray(fit.fittedvalues, dtype=float)
+        if len(fitted) < len(y_arr):
+            fitted = np.pad(fitted, (len(y_arr) - len(fitted), 0), mode="edge")
+        return fitted[-len(y_arr) :]
+    return None
+
+
+def _residual_diagnostic_bundle(y_true, fitted, method):
+    """Build residual plots + Shapiro-Wilk test for one model."""
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    fitted = np.asarray(fitted, dtype=float).ravel()
+    n = min(len(y_true), len(fitted))
+    if n < 10:
+        return {"error": "Need at least 10 points for residual diagnostics."}
+    y_true = y_true[-n:]
+    fitted = fitted[-n:]
+    residuals = y_true - fitted
+    if not np.isfinite(residuals).all():
+        mask = np.isfinite(residuals) & np.isfinite(fitted)
+        residuals = residuals[mask]
+        fitted = fitted[mask]
+    if len(residuals) < 10:
+        return {"error": "Not enough finite residuals after cleaning."}
+
+    try:
+        from scipy import stats
+    except Exception:
+        return {"error": "Residual tests require scipy. Add scipy to requirements.txt."}
+
+    osm, osr = stats.probplot(residuals, dist="norm", fit=False)
+    qq_fig = go.Figure()
+    qq_fig.add_trace(go.Scatter(x=osm, y=osr, mode="markers", name="Residual quantiles"))
+    slope, intercept, r_val = stats.linregress(osm, osr)[:3]
+    xx = np.linspace(np.min(osm), np.max(osm), 80)
+    qq_fig.add_trace(go.Scatter(x=xx, y=slope * xx + intercept, mode="lines", name="Reference line"))
+    qq_fig.update_layout(title=f"QQ plot — {method}", xaxis_title="Theoretical quantiles", yaxis_title="Residual quantiles", height=360)
+
+    resid_fig = go.Figure()
+    resid_fig.add_trace(go.Scatter(x=fitted, y=residuals, mode="markers", name="Residuals"))
+    resid_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    resid_fig.update_layout(title=f"Residuals vs fitted — {method}", xaxis_title="Fitted", yaxis_title="Residual", height=360)
+
+    acf_fig = _acf_plotly(residuals, title=f"Residual ACF — {method}", max_lag=min(30, max(5, len(residuals) // 3)), adjust_slow_acf=False)
+    shapiro_stat, shapiro_p = stats.shapiro(residuals if len(residuals) <= 5000 else residuals[-5000:])
+    return {
+        "residuals": residuals,
+        "fitted": fitted,
+        "qq_fig": qq_fig,
+        "resid_fig": resid_fig,
+        "acf_fig": acf_fig,
+        "shapiro_stat": float(shapiro_stat),
+        "shapiro_p": float(shapiro_p),
+        "qq_r": float(r_val),
+    }
+
+
+def _plotly_to_png_bytes(fig):
+    try:
+        width = 1400
+        height = 820
+        try:
+            if hasattr(fig, "layout") and getattr(fig.layout, "width", None):
+                width = max(1200, int(fig.layout.width))
+            if hasattr(fig, "layout") and getattr(fig.layout, "height", None):
+                height = max(700, int(fig.layout.height))
+        except Exception:
+            pass
+        return fig.to_image(format="png", width=width, height=height, scale=2)
+    except Exception:
+        return None
+
+
+def _spatial_grid_plotly(values_grid, bounds, title):
+    """Static spatial heatmap figure for PDF export."""
+    try:
+        minx, miny, maxx, maxy = bounds
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=np.asarray(values_grid, dtype=float),
+                colorscale="Blues",
+                colorbar=dict(title="Intensity"),
+            )
+        )
+        fig.update_layout(
+            title=title,
+            height=480,
+            xaxis_title=f"Longitude ({minx:.2f} to {maxx:.2f})",
+            yaxis_title=f"Latitude ({miny:.2f} to {maxy:.2f})",
+            margin=dict(t=60, b=45, l=55, r=25),
+        )
+        return fig
+    except Exception:
+        return None
+
+
+def _build_forecast_pdf_report_bytes(payload):
+    """Create a polished PDF report using reportlab (with fallback)."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            Image as RLImage,
+            Table,
+            TableStyle,
+            PageBreak,
+        )
+    except Exception:
+        # Fallback path for environments where reportlab wheels are unavailable.
+        return _build_forecast_pdf_report_bytes_pillow(payload)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        leftMargin=1.5 * cm,
+        rightMargin=1.5 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+    )
+    styles = getSampleStyleSheet()
+    story = []
+
+    def add_title(text):
+        story.append(Paragraph(f"<b>{html_module.escape(str(text))}</b>", styles["Title"]))
+        story.append(Spacer(1, 0.25 * cm))
+
+    def add_para(text):
+        story.append(Paragraph(html_module.escape(str(text)).replace("\n", "<br/>"), styles["BodyText"]))
+        story.append(Spacer(1, 0.18 * cm))
+
+    def add_plot(fig, caption):
+        png = _plotly_to_png_bytes(fig)
+        if png is None:
+            add_para(f"[Plot unavailable: {caption}]")
+            return
+        story.append(Paragraph(f"<b>{html_module.escape(caption)}</b>", styles["Heading4"]))
+        img = RLImage(BytesIO(png))
+        img.drawWidth = doc.width
+        img.drawHeight = doc.width * 0.56
+        story.append(img)
+        story.append(Spacer(1, 0.22 * cm))
+
+    add_title("FAIM Forecast Report")
+    if payload.get("plain_summary"):
+        add_para(payload["plain_summary"])
+    if payload.get("insights_md"):
+        add_para("Key insights:")
+        for ln in str(payload["insights_md"]).splitlines():
+            if ln.strip():
+                add_para(ln.lstrip("- ").strip())
+
+    summary_rows = payload.get("summary_rows") or []
+    if summary_rows:
+        story.append(Paragraph("<b>Summary statistics</b>", styles["Heading3"]))
+        headers = ["Series", "Mean", "Min", "Max", "Std"]
+        data = [headers]
+        for r in summary_rows:
+            data.append(
+                [
+                    str(r.get("Series", "")),
+                    f"{float(r.get('Mean', np.nan)):.2f}",
+                    f"{float(r.get('Min', np.nan)):.2f}",
+                    f"{float(r.get('Max', np.nan)):.2f}",
+                    f"{float(r.get('Std', np.nan)):.2f}",
+                ]
+            )
+        tbl = Table(data, repeatRows=1, colWidths=[doc.width * 0.42, doc.width * 0.145, doc.width * 0.145, doc.width * 0.145, doc.width * 0.145])
+        tbl.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#B8C2D3")),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+                ]
+            )
+        )
+        story.append(tbl)
+        story.append(Spacer(1, 0.35 * cm))
+
+    add_plot(payload.get("forecast_fig"), "Forecast time series")
+    add_plot(payload.get("spatial_fig"), "Spatial heatmap snapshot")
+    add_plot(payload.get("hist_acf_fig"), "Historical ACF")
+    add_plot(payload.get("hist_dist_fig"), "Historical distribution")
+
+    residuals = payload.get("residual_diagnostics") or {}
+    if residuals:
+        story.append(PageBreak())
+        story.append(Paragraph("<b>Residual diagnostics</b>", styles["Heading2"]))
+        story.append(Spacer(1, 0.2 * cm))
+        for method, diag in residuals.items():
+            story.append(Paragraph(f"<b>{html_module.escape(method)}</b>", styles["Heading3"]))
+            if "error" in diag:
+                add_para(diag["error"])
+                continue
+            add_para(
+                f"Shapiro-Wilk: W={diag.get('shapiro_stat', np.nan):.4f}, "
+                f"p={diag.get('shapiro_p', np.nan):.4f}"
+            )
+            add_plot(diag.get("qq_fig"), f"{method} — QQ plot")
+            add_plot(diag.get("resid_fig"), f"{method} — Residuals vs fitted")
+            add_plot(diag.get("acf_fig"), f"{method} — Residual ACF")
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue(), None
+
+
+def _build_forecast_pdf_report_bytes_pillow(payload):
+    """Fallback PDF builder using Pillow only (works when reportlab isn't available)."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None, "PDF export requires reportlab or pillow (pip install reportlab pillow)."
+
+    # A4-ish page at ~150 DPI
+    page_w, page_h = 1240, 1754
+    margin = 35
+    line_h = 22
+    pages = []
+    page = Image.new("RGB", (page_w, page_h), "white")
+    draw = ImageDraw.Draw(page)
+    font = ImageFont.load_default()
+    y = margin
+
+    def flush_page():
+        nonlocal page, draw, y
+        pages.append(page)
+        page = Image.new("RGB", (page_w, page_h), "white")
+        draw = ImageDraw.Draw(page)
+        y = margin
+
+    def write_line(txt):
+        nonlocal y
+        if y > page_h - margin - line_h:
+            flush_page()
+        draw.text((margin, y), str(txt)[:150], fill="black", font=font)
+        y += line_h
+
+    def add_plot(fig, title):
+        nonlocal y
+        png = _plotly_to_png_bytes(fig)
+        if png is None:
+            write_line(f"[Plot unavailable: {title}]")
+            return
+        try:
+            img = Image.open(BytesIO(png)).convert("RGB")
+        except Exception:
+            write_line(f"[Plot decode failed: {title}]")
+            return
+        max_w = page_w - 2 * margin
+        max_h = 360
+        img.thumbnail((max_w, max_h))
+        if y + 22 + img.height > page_h - margin:
+            flush_page()
+        write_line(title)
+        page.paste(img, (margin, y))
+        y += img.height + 18
+
+    write_line("FAIM Forecast Report")
+    write_line("-" * 40)
+    for ln in str(payload.get("plain_summary", "")).split("\n"):
+        if ln.strip():
+            write_line(ln.strip())
+    write_line("")
+    write_line("Summary statistics:")
+    for row in payload.get("summary_rows", []):
+        write_line(
+            f"{row.get('Series','')}: mean={row.get('Mean', np.nan):.2f}, min={row.get('Min', np.nan):.2f}, "
+            f"max={row.get('Max', np.nan):.2f}, std={row.get('Std', np.nan):.2f}"
+        )
+
+    if payload.get("forecast_fig") is not None:
+        add_plot(payload["forecast_fig"], "Forecast time series")
+    if payload.get("hist_acf_fig") is not None:
+        add_plot(payload["hist_acf_fig"], "Historical ACF")
+    if payload.get("hist_dist_fig") is not None:
+        add_plot(payload["hist_dist_fig"], "Historical distribution")
+
+    for method, diag in (payload.get("residual_diagnostics") or {}).items():
+        write_line("")
+        write_line(f"Residual diagnostics — {method}")
+        if "error" in diag:
+            write_line(f"  {diag['error']}")
+            continue
+        write_line(
+            f"  Shapiro-Wilk: W={diag.get('shapiro_stat', np.nan):.4f}, p={diag.get('shapiro_p', np.nan):.4f}"
+        )
+        add_plot(diag.get("qq_fig"), f"{method}: QQ plot")
+        add_plot(diag.get("resid_fig"), f"{method}: residuals vs fitted")
+        add_plot(diag.get("acf_fig"), f"{method}: residual ACF")
+
+    pages.append(page)
+    out = BytesIO()
+    try:
+        pages[0].save(out, format="PDF", save_all=True, append_images=pages[1:])
+    except Exception as e:
+        return None, f"Pillow PDF generation failed: {e}"
+    out.seek(0)
+    return out.getvalue(), None
+
+
 def run_iterative_ml_forecast(
     method,
     X_scaled,
@@ -1487,6 +1926,8 @@ if 'map_type' not in st.session_state:
     st.session_state.map_type = "Street"
 if 'forecast_insights_md' not in st.session_state:
     st.session_state.forecast_insights_md = None
+if 'forecast_report_payload' not in st.session_state:
+    st.session_state.forecast_report_payload = None
 
 # Sidebar controls
 st.sidebar.header("⚙️ Controls")
@@ -2880,9 +3321,14 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         if forecast_results:
                                             # Display forecast visualization in spatial_placeholder (col_map)
                                             with spatial_placeholder.container():
+                                                plain_summary = _simple_forecast_findings_summary(
+                                                    forecast_results, y, forecast_target, future_dates
+                                                )
                                                 _ins = st.session_state.get("forecast_insights_md")
                                                 if _ins:
                                                     st.subheader("💡 Useful insights")
+                                                    if plain_summary:
+                                                        st.info(plain_summary)
                                                     st.markdown(_ins)
                                                     st.markdown("---")
                                                 y_hist = daily_avg[forecast_target].dropna().astype(float)
@@ -3029,6 +3475,81 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                     else:
                                                         st.info("No distribution to show.")
 
+                                                # Residual diagnostics (before summary table)
+                                                residual_diagnostics = {}
+                                                fitted_by_method = {}
+                                                y_true_diag = np.asarray(y, dtype=float)
+                                                for method in forecast_results.keys():
+                                                    try:
+                                                        fitted = _fit_in_sample_predictions(
+                                                            method,
+                                                            X_scaled,
+                                                            y_true_diag,
+                                                            df_ml,
+                                                            forecast_target,
+                                                            model_params,
+                                                        )
+                                                        if fitted is None:
+                                                            residual_diagnostics[method] = {
+                                                                "error": "Residual diagnostics unavailable for this model."
+                                                            }
+                                                        else:
+                                                            fitted = np.asarray(fitted, dtype=float).ravel()
+                                                            fitted_by_method[method] = fitted
+                                                            residual_diagnostics[method] = _residual_diagnostic_bundle(
+                                                                y_true_diag, fitted, method
+                                                            )
+                                                    except Exception as diag_e:
+                                                        residual_diagnostics[method] = {"error": str(diag_e)}
+
+                                                if "Ensemble" in forecast_results and "Ensemble" not in residual_diagnostics:
+                                                    available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
+                                                    available = [np.asarray(a, dtype=float) for a in available if a is not None]
+                                                    if available:
+                                                        ens_fit = np.mean(np.vstack(available), axis=0)
+                                                        residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
+                                                            y_true_diag, ens_fit, "Ensemble"
+                                                        )
+                                                    else:
+                                                        residual_diagnostics["Ensemble"] = {
+                                                            "error": "No base-model fitted values available for ensemble residual diagnostics."
+                                                        }
+
+                                                st.subheader("Residual diagnostics")
+                                                st.caption(
+                                                    "Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, "
+                                                    "and Shapiro-Wilk normality test."
+                                                )
+                                                tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
+                                                if tab_names:
+                                                    diag_tabs = st.tabs(tab_names)
+                                                    for t_i, m_name in enumerate(tab_names):
+                                                        with diag_tabs[t_i]:
+                                                            d = residual_diagnostics[m_name]
+                                                            if "error" in d:
+                                                                st.warning(d["error"])
+                                                            else:
+                                                                if hasattr(st, "popover"):
+                                                                    with st.popover("Open residual test details"):
+                                                                        st.metric("Shapiro-Wilk W", f"{d['shapiro_stat']:.4f}")
+                                                                        st.metric("Shapiro p-value", f"{d['shapiro_p']:.4f}")
+                                                                        if d["shapiro_p"] < 0.05:
+                                                                            st.caption("p < 0.05 suggests residuals are not normal.")
+                                                                        else:
+                                                                            st.caption("p >= 0.05 suggests no strong evidence against normality.")
+                                                                else:
+                                                                    st.write(
+                                                                        f"Shapiro-Wilk W: {d['shapiro_stat']:.4f} | p-value: {d['shapiro_p']:.4f}"
+                                                                    )
+                                                                r1, r2 = st.columns(2)
+                                                                with r1:
+                                                                    st.plotly_chart(d["qq_fig"], use_container_width=True)
+                                                                with r2:
+                                                                    st.plotly_chart(d["resid_fig"], use_container_width=True)
+                                                                st.plotly_chart(d["acf_fig"], use_container_width=True)
+                                                else:
+                                                    st.info("Residual diagnostics unavailable for the selected models.")
+
                                                 summary_rows_fc = []
                                                 if len(y_hist):
                                                     summary_rows_fc.append({
@@ -3053,6 +3574,20 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                     use_container_width=True,
                                                     hide_index=True,
                                                 )
+                                                st.session_state.forecast_report_payload = {
+                                                    "plain_summary": plain_summary,
+                                                    "insights_md": _ins,
+                                                    "summary_rows": summary_rows_fc,
+                                                    "forecast_fig": fig,
+                                                    "spatial_fig": _spatial_grid_plotly(
+                                                        values_grid if "values_grid" in locals() else None,
+                                                        bounds,
+                                                        "Spatial heatmap (latest historical snapshot)",
+                                                    ) if "values_grid" in locals() and values_grid is not None else None,
+                                                    "hist_acf_fig": acf_fig_fc,
+                                                    "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
+                                                    "residual_diagnostics": residual_diagnostics,
+                                                }
                                             # Prepare export data
                                             export_df = daily_avg[['date', forecast_target]].copy()
                                             export_df['type'] = 'historical'
@@ -3359,22 +3894,18 @@ if not st.session_state.show_selection_map and processed_bounds:
                     
                     if forecast_mode and 'combined_export_data' in st.session_state:
                         st.write(f"Export includes historical {forecast_target} and all forecast models")
-                        
-                        if st.button("📥 Export Historical + Forecast CSV", key="export_forecast"):
-                            export_data = st.session_state.combined_export_data
-                            
-                            csv_buffer = StringIO()
-                            export_data.to_csv(csv_buffer, index=False)
-                            csv_str = csv_buffer.getvalue()
-                            
-                            st.download_button(
-                                label="⬇️ Download Historical + Forecast CSV",
-                                data=csv_str,
-                                file_name=f"{forecast_target}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
-                                mime="text/csv"
-                            )
-                            
-                            st.success(f"Prepared {len(export_data)} records")
+                        export_data = st.session_state.combined_export_data
+                        csv_buffer = StringIO()
+                        export_data.to_csv(csv_buffer, index=False)
+                        csv_str = csv_buffer.getvalue()
+
+                        st.download_button(
+                            label="⬇️ Export Historical + Forecast CSV",
+                            data=csv_str,
+                            file_name=f"{forecast_target}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
+                            mime="text/csv",
+                            key="download_forecast_csv",
+                        )
                     
                     else:
                         export_params = st.multiselect(
