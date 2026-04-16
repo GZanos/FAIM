@@ -651,10 +651,10 @@ def prepare_ml_features(df, target_col, feature_cols, lag_days=7):
     df_clean = df[df['nan_count'] < nan_threshold].copy()
     df_clean = df_clean.drop('nan_count', axis=1)
     
-    # Fill remaining NaN with forward fill then backward fill
+    # Fill remaining NaN with forward fill then backward fill (pandas 2.2+ removed fillna(method=...))
     for col in feature_names:
         if col in df_clean.columns:
-            df_clean[col] = df_clean[col].fillna(method='ffill').fillna(method='bfill').fillna(0)
+            df_clean[col] = df_clean[col].ffill().bfill().fillna(0)
     
     return df_clean, feature_names
 
