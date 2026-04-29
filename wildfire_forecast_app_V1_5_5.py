@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import geopandas as gpd
-from shapely.geometry import Polygon, box
+from shapely.geometry import Polygon, Point, box
 import folium
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
@@ -15,6 +15,7 @@ from io import StringIO, BytesIO
 import json
 import html as html_module
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import BayesianRidge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -47,7 +48,7 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
 
 # Configure page
 st.set_page_config(
-    page_title="FAIM - Forecasting Analyzer of Ignition Metrics",
+    page_title="FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -95,7 +96,7 @@ else:
         st.sidebar.warning("Upgrade Streamlit to 1.33+ for the guide popup.")
 
 # Title and description
-st.title("🎯 FAIM - Forecasting Analyzer of Ignition Metrics")
+st.title("🎯 FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring")
 st.markdown("""
 Advanced meteorological forecasting and fire risk analysis platform.
 
@@ -321,6 +322,88 @@ def create_sample_data_for_period(start_date, end_date):
     df = pd.DataFrame(records)
     return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
 
+
+@st.cache_resource
+def load_global_land_geometry():
+    """Load world land polygons once for AOI land/ocean validation."""
+    try:
+        world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+    except Exception:
+        world = None
+    if world is None:
+        try:
+            import requests
+            import tempfile
+            import zipfile
+            from pathlib import Path
+            from io import BytesIO
+
+            url = "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            with tempfile.TemporaryDirectory() as td:
+                zf = zipfile.ZipFile(BytesIO(resp.content))
+                zf.extractall(td)
+                shp = next(Path(td).glob("*.shp"), None)
+                if shp is None:
+                    return None
+                world = gpd.read_file(str(shp))
+        except Exception:
+            return None
+    world = world.to_crs("EPSG:4326")
+    world = world[world.geometry.notna()].copy()
+    if world.empty:
+        return None
+    return world.unary_union
+
+
+def evaluate_aoi_land_coverage(bounds, land_geom):
+    """
+    Return dict with AOI polygon, land overlap ratio and validity flags.
+    Uses equal-area projection for robust area ratios.
+    """
+    minx, miny, maxx, maxy = bounds
+    aoi_poly = box(minx, miny, maxx, maxy)
+    if land_geom is None:
+        return {
+            "aoi_poly": aoi_poly,
+            "land_ratio": 1.0,
+            "is_non_land": False,
+            "has_partial_ocean": False,
+            "land_geom_aoi": aoi_poly,
+        }
+    try:
+        land_geom_aoi = aoi_poly.intersection(land_geom)
+        gdf_tmp = gpd.GeoDataFrame(
+            {"kind": ["aoi", "land"]},
+            geometry=[aoi_poly, land_geom_aoi],
+            crs="EPSG:4326",
+        ).to_crs("EPSG:6933")
+        aoi_area = float(gdf_tmp.geometry.iloc[0].area)
+        land_area = float(gdf_tmp.geometry.iloc[1].area)
+        ratio = 0.0 if aoi_area <= 0 else max(0.0, min(1.0, land_area / aoi_area))
+    except Exception:
+        ratio = 1.0
+        land_geom_aoi = aoi_poly
+    return {
+        "aoi_poly": aoi_poly,
+        "land_ratio": ratio,
+        "is_non_land": ratio < 0.05,
+        "has_partial_ocean": 0.05 <= ratio < 0.98,
+        "land_geom_aoi": land_geom_aoi,
+    }
+
+
+def filter_points_to_land(gdf, land_geom_aoi):
+    """Keep only points on land for selected AOI."""
+    if gdf is None or gdf.empty or land_geom_aoi is None or getattr(land_geom_aoi, "is_empty", False):
+        return gdf
+    try:
+        keep = gdf.geometry.apply(lambda p: bool(land_geom_aoi.covers(p)))
+        return gdf[keep].copy()
+    except Exception:
+        return gdf
+
 def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r', opacity=0.4, metric_name="Value", full_map_bounds=None):
     """
     Create a smooth continuous heatmap overlay using HeatMap plugin with blue gradient
@@ -335,6 +418,7 @@ def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r',
     # Get value range for normalization and legend
     vmin = np.nanmin(values_grid)
     vmax = np.nanmax(values_grid)
+    vrange = vmax - vmin
     
     # Convert grid to HeatMap format: [[lat, lon, normalized_intensity], ...]
     heatmap_data = []
@@ -384,10 +468,10 @@ def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r',
         '#E3F2FD,#90CAF9,#42A5F5,#1E88E5,#1565C0,#0D47A1);border:2px solid #333;border-radius:3px;"></div>'
         '</div>'
         '<div style="display:flex;justify-content:space-between;font-size:12px;margin-top:4px;color:#000;font-weight:600;">'
-        f'<span><b>Low:</b> {vmin:.1f}</span><span><b>High:</b> {vmax:.1f}</span>'
+        f'<span><b>Min:</b> {vmin:.1f}</span><span><b>Max:</b> {vmax:.1f}</span>'
         '</div>'
         '<div style="text-align:center;font-size:11px;margin-top:6px;padding-top:6px;border-top:2px solid #ccc;color:#000;font-weight:600;">'
-        f'<div><b>Mean:</b> {mean_g:.1f}</div><div><b>Std:</b> {std_g:.1f}</div>'
+        f'<div><b>Range:</b> {vrange:.1f}</div><div><b>Mean:</b> {mean_g:.1f}</div><div><b>Std:</b> {std_g:.1f}</div>'
         '</div>'
     )
     inner_json = json.dumps(inner_legend)
@@ -403,7 +487,7 @@ def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r',
     c.style.position = 'relative';
     var anchor = document.createElement('div');
     anchor.className = 'faim-heatmap-legend-anchor';
-    anchor.style.cssText = 'position:absolute;top:10px;right:10px;width:186px;z-index:6500;font-size:13px;pointer-events:none;';
+    anchor.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);width:220px;max-width:78%;z-index:6500;font-size:13px;pointer-events:none;';
     var pane = document.createElement('div');
     pane.style.cssText = 'background-color:rgba(255,255,255,0.95);border:3px solid #333;border-radius:8px;padding:10px;box-shadow:0 4px 20px rgba(0,0,0,0.4);pointer-events:auto;';
     pane.innerHTML = {inner_json};
@@ -480,7 +564,16 @@ def _enrich_near_uniform_heatmap(values_grid, aoi_bounds, obs_v, reference_std=N
     return vg + sigma * bump
 
 
-def create_heatmap_data(gdf, aoi_bounds, metric, grid_size=80, n_anchor_lon=5, n_anchor_lat=4, reference_std=None):
+def create_heatmap_data(
+    gdf,
+    aoi_bounds,
+    metric,
+    grid_size=80,
+    n_anchor_lon=5,
+    n_anchor_lat=4,
+    reference_std=None,
+    land_geom_aoi=None,
+):
     """
     Build a smooth value grid over the AOI using inverse-distance interpolation.
 
@@ -532,6 +625,17 @@ def create_heatmap_data(gdf, aoi_bounds, metric, grid_size=80, n_anchor_lon=5, n
     flat = w_ga @ anchor_vals
     values_grid = flat.reshape(grid_size, grid_size)
     values_grid = _enrich_near_uniform_heatmap(values_grid, aoi_bounds, obs_v, reference_std=reference_std)
+
+    # Mask ocean cells so heatmap only covers land inside AOI.
+    if land_geom_aoi is not None and not getattr(land_geom_aoi, "is_empty", False):
+        land_mask = np.zeros_like(values_grid, dtype=bool)
+        for i, lat in enumerate(lat_c):
+            for j, lon in enumerate(lon_c):
+                try:
+                    land_mask[i, j] = bool(land_geom_aoi.covers(Point(float(lon), float(lat))))
+                except Exception:
+                    land_mask[i, j] = True
+        values_grid = np.where(land_mask, values_grid, np.nan)
 
     values_list = values_grid[np.isfinite(values_grid)].ravel().tolist()
     return values_grid, values_list
@@ -860,6 +964,44 @@ def train_prophet(df_prophet, forecast_horizon, params=None):
     except Exception as e:
         raise Exception(f"Prophet training failed: {str(e)}")
 
+def propose_sarima_params(y_train, params=None):
+    """Auto-propose SARIMA order by lightweight AIC search."""
+    y_arr = np.asarray(y_train, dtype=float).ravel()
+    y_arr = y_arr[np.isfinite(y_arr)]
+    if len(y_arr) < 30:
+        return {"order": (1, 1, 1), "seasonal_order": (1, 1, 1, 7)}
+    seasonal_period = int((params or {}).get("seasonal_period", 7))
+    p_max = int((params or {}).get("p_max", 2))
+    q_max = int((params or {}).get("q_max", 2))
+    P_max = int((params or {}).get("P_max", 1))
+    Q_max = int((params or {}).get("Q_max", 1))
+    d = int((params or {}).get("d", 1))
+    D = int((params or {}).get("D", 1))
+    best = {"aic": np.inf, "order": (1, d, 1), "seasonal_order": (1, D, 1, seasonal_period)}
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+    for p in range(p_max + 1):
+        for q in range(q_max + 1):
+            for P in range(P_max + 1):
+                for Q in range(Q_max + 1):
+                    try:
+                        fit = SARIMAX(
+                            y_arr,
+                            order=(p, d, q),
+                            seasonal_order=(P, D, Q, seasonal_period),
+                            enforce_stationarity=False,
+                            enforce_invertibility=False,
+                        ).fit(disp=False)
+                        if np.isfinite(fit.aic) and fit.aic < best["aic"]:
+                            best = {
+                                "aic": float(fit.aic),
+                                "order": (p, d, q),
+                                "seasonal_order": (P, D, Q, seasonal_period),
+                            }
+                    except Exception:
+                        continue
+    return {"order": best["order"], "seasonal_order": best["seasonal_order"]}
+
+
 def train_sarima(y_train, forecast_horizon, params=None):
     """Train SARIMA model"""
     try:
@@ -868,13 +1010,20 @@ def train_sarima(y_train, forecast_horizon, params=None):
         warnings.filterwarnings('ignore')
         
         if params is None:
-            params = {'order': (1, 1, 1), 'seasonal_order': (1, 1, 1, 7)}
+            params = {}
+        if params.get("use_auto", True):
+            proposed = propose_sarima_params(y_train, params.get("auto_search"))
+            order = proposed.get("order", (1, 1, 1))
+            seasonal_order = proposed.get("seasonal_order", (1, 1, 1, 7))
+        else:
+            order = params.get("order", (1, 1, 1))
+            seasonal_order = params.get("seasonal_order", (1, 1, 1, 7))
         
         # Fit SARIMA model with seasonal components
         model = SARIMAX(
             y_train,
-            order=params.get('order', (1, 1, 1)),  # (p, d, q)
-            seasonal_order=params.get('seasonal_order', (1, 1, 1, 7)),  # (P, D, Q, s) - weekly seasonality
+            order=order,
+            seasonal_order=seasonal_order,
             enforce_stationarity=False,
             enforce_invertibility=False
         )
@@ -969,6 +1118,9 @@ def _acf_plotly(series, title="Autocorrelation", max_lag=40, adjust_slow_acf=Tru
 
     acf, ml = _acf_numpy(y_work, max_lag=max_lag)
     lags = np.arange(len(acf))
+    if len(lags) > 1:
+        lags = lags[1:]
+        acf = acf[1:]
     fig = go.Figure()
     fig.add_trace(
         go.Bar(x=lags, y=acf, marker_color="#42A5F5", name="ACF")
@@ -985,7 +1137,7 @@ def _acf_plotly(series, title="Autocorrelation", max_lag=40, adjust_slow_acf=Tru
         title=f"{title}<br><sup style='font-size:11px'>{sub}</sup>",
         xaxis_title="Lag (days)",
         yaxis_title="ACF",
-        height=360,
+        height=300,
         showlegend=False,
         margin=dict(t=60, b=40),
     )
@@ -1358,11 +1510,45 @@ def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target,
     return f"{s1}\n\n{s2}\n\n{s3}"
 
 
+def _in_sample_seasonal_baseline_fit(df_ml, forecast_target, min_train=30):
+    """Fallback in-sample fitted values using rolling seasonal baseline."""
+    df = df_ml[["date", forecast_target]].dropna().sort_values("date").reset_index(drop=True)
+    if len(df) < min_train + 5:
+        return None
+    fitted = np.full(len(df), np.nan, dtype=float)
+    for i in range(min_train, len(df)):
+        hist = df.iloc[:i]
+        tdoy = int(df.loc[i, "date"].timetuple().tm_yday)
+        h = hist.copy()
+        h["doy"] = h["date"].dt.dayofyear
+        diff = (h["doy"] - tdoy).abs()
+        diff = np.minimum(diff, 366 - diff)
+        block = h.loc[diff <= 10, forecast_target]
+        if len(block) == 0:
+            fitted[i] = float(hist[forecast_target].mean())
+        else:
+            fitted[i] = float(block.mean())
+    valid = np.isfinite(fitted)
+    if valid.sum() < 10:
+        return None
+    return fitted[valid], df.loc[valid, forecast_target].to_numpy(dtype=float)
+
+
 def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, model_params):
     """Compute fitted (in-sample) predictions for residual diagnostics."""
     y_arr = np.asarray(y, dtype=float)
     if method == "Linear Regression":
         m = LinearRegression()
+        m.fit(X_scaled, y_arr)
+        return np.asarray(m.predict(X_scaled), dtype=float)
+    if method == "Bayesian Linear Regression":
+        mp = model_params.get("Bayesian Linear Regression") or {}
+        m = BayesianRidge(
+            alpha_1=float(mp.get("alpha_1", 1e-6)),
+            alpha_2=float(mp.get("alpha_2", 1e-6)),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+        )
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Random Forest":
@@ -1446,10 +1632,17 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         from statsmodels.tsa.statespace.sarimax import SARIMAX
 
         mp = model_params.get("SARIMA") or {}
+        if mp.get("use_auto", True):
+            proposed = propose_sarima_params(y_arr, mp.get("auto_search"))
+            order = proposed.get("order", (1, 1, 1))
+            seasonal_order = proposed.get("seasonal_order", (1, 1, 1, 7))
+        else:
+            order = mp.get("order", (1, 1, 1))
+            seasonal_order = mp.get("seasonal_order", (1, 1, 1, 7))
         m = SARIMAX(
             y_arr,
-            order=mp.get("order", (1, 1, 1)),
-            seasonal_order=mp.get("seasonal_order", (1, 1, 1, 7)),
+            order=order,
+            seasonal_order=seasonal_order,
             enforce_stationarity=False,
             enforce_invertibility=False,
         )
@@ -1458,6 +1651,14 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         if len(fitted) < len(y_arr):
             fitted = np.pad(fitted, (len(y_arr) - len(fitted), 0), mode="edge")
         return fitted[-len(y_arr) :]
+    if method == "LLM Forecaster":
+        baseline = _in_sample_seasonal_baseline_fit(df_ml, forecast_target, min_train=30)
+        if baseline is None:
+            return None
+        fitted_valid, y_valid = baseline
+        full = np.full(len(y_arr), np.nan, dtype=float)
+        full[-len(fitted_valid):] = fitted_valid
+        return full
     return None
 
 
@@ -1483,21 +1684,26 @@ def _residual_diagnostic_bundle(y_true, fitted, method):
     except Exception:
         return {"error": "Residual tests require scipy. Add scipy to requirements.txt."}
 
+    shapiro_stat, shapiro_p = stats.shapiro(residuals if len(residuals) <= 5000 else residuals[-5000:])
     osm, osr = stats.probplot(residuals, dist="norm", fit=False)
     qq_fig = go.Figure()
     qq_fig.add_trace(go.Scatter(x=osm, y=osr, mode="markers", name="Residual quantiles"))
     slope, intercept, r_val = stats.linregress(osm, osr)[:3]
     xx = np.linspace(np.min(osm), np.max(osm), 80)
     qq_fig.add_trace(go.Scatter(x=xx, y=slope * xx + intercept, mode="lines", name="Reference line"))
-    qq_fig.update_layout(title=f"QQ plot — {method}", xaxis_title="Theoretical quantiles", yaxis_title="Residual quantiles", height=360)
+    qq_fig.update_layout(
+        title=f"QQ plot — {method} (Shapiro-Wilk p={shapiro_p:.4f})",
+        xaxis_title="Theoretical quantiles",
+        yaxis_title="Residual quantiles",
+        height=320,
+    )
 
     resid_fig = go.Figure()
     resid_fig.add_trace(go.Scatter(x=fitted, y=residuals, mode="markers", name="Residuals"))
     resid_fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    resid_fig.update_layout(title=f"Residuals vs fitted — {method}", xaxis_title="Fitted", yaxis_title="Residual", height=360)
+    resid_fig.update_layout(title=f"Residuals vs fitted — {method}", xaxis_title="Fitted", yaxis_title="Residual", height=320)
 
     acf_fig = _acf_plotly(residuals, title=f"Residual ACF — {method}", max_lag=min(30, max(5, len(residuals) // 3)), adjust_slow_acf=False)
-    shapiro_stat, shapiro_p = stats.shapiro(residuals if len(residuals) <= 5000 else residuals[-5000:])
     return {
         "residuals": residuals,
         "fitted": fitted,
@@ -1508,6 +1714,54 @@ def _residual_diagnostic_bundle(y_true, fitted, method):
         "shapiro_p": float(shapiro_p),
         "qq_r": float(r_val),
     }
+
+
+def _estimate_effective_k(method, model_params, n_features, n_selected_methods):
+    """Approximate model complexity for information criteria benchmarking."""
+    if method in ("Linear Regression", "Bayesian Linear Regression"):
+        return int(n_features) + 1
+    if method == "Random Forest":
+        return int((model_params.get("Random Forest") or {}).get("n_estimators", 100))
+    if method == "Gradient Boosting":
+        return int((model_params.get("Gradient Boosting") or {}).get("n_estimators", 100))
+    if method == "XGBoost":
+        return int((model_params.get("XGBoost") or {}).get("n_estimators", 100))
+    if method == "Prophet":
+        return 10
+    if method == "SARIMA":
+        mp = model_params.get("SARIMA") or {}
+        p, d, q = mp.get("order", (1, 1, 1))
+        P, D, Q, _s = mp.get("seasonal_order", (1, 1, 1, 7))
+        return int(p + q + P + Q + 2)
+    if method == "FBLiR":
+        return int(n_features) + 3
+    if method == "LLM Forecaster":
+        return max(3, int(n_features) + 1)
+    if method == "Ensemble":
+        return max(1, int(n_selected_methods))
+    return max(1, int(n_features))
+
+
+def _aic_bic_from_fit(y_true, fitted, k):
+    """Compute AIC/BIC from residual variance approximation."""
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    fitted = np.asarray(fitted, dtype=float).ravel()
+    n = min(len(y_true), len(fitted))
+    if n < 3:
+        return np.nan, np.nan
+    err = y_true[-n:] - fitted[-n:]
+    err = err[np.isfinite(err)]
+    n = len(err)
+    if n < 3:
+        return np.nan, np.nan
+    rss = float(np.sum(err ** 2))
+    if rss <= 0:
+        rss = 1e-12
+    sigma2 = rss / n
+    k = max(1, int(k))
+    aic = n * np.log(sigma2) + 2 * k
+    bic = n * np.log(sigma2) + k * np.log(n)
+    return float(aic), float(bic)
 
 
 def _plotly_to_png_bytes(fig):
@@ -1786,6 +2040,19 @@ def run_iterative_ml_forecast(
         def predict_one(row_scaled_df):
             return float(model.predict(row_scaled_df)[0])
 
+    elif method == "Bayesian Linear Regression":
+        mp = model_params.get("Bayesian Linear Regression") or {}
+        model = BayesianRidge(
+            alpha_1=float(mp.get("alpha_1", 1e-6)),
+            alpha_2=float(mp.get("alpha_2", 1e-6)),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+        )
+        model.fit(X_scaled, y)
+
+        def predict_one(row_scaled_df):
+            return float(model.predict(row_scaled_df)[0])
+
     elif method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
         model = RandomForestRegressor(
@@ -2013,7 +2280,7 @@ if data_source == "Forecasting":
         st.sidebar.warning("⚠️ Please select at least one feature")
     
     # Build forecast methods list
-    available_forecast_methods = ["Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", 
+    available_forecast_methods = ["Linear Regression", "Bayesian Linear Regression", "Random Forest", "Gradient Boosting", "XGBoost", 
                                    "Prophet", "SARIMA", "LLM Forecaster", "Ensemble"]
     
     # Add FBLiR if available
@@ -2053,6 +2320,19 @@ if data_source == "Forecasting":
                 'max_depth': rf_max_depth,
                 'min_samples_split': rf_min_samples_split
             }
+
+        if "Bayesian Linear Regression" in forecast_methods:
+            st.markdown("**Bayesian Linear Regression**")
+            blr_alpha_1 = st.number_input("alpha_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_1")
+            blr_alpha_2 = st.number_input("alpha_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_2")
+            blr_lambda_1 = st.number_input("lambda_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_1")
+            blr_lambda_2 = st.number_input("lambda_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_2")
+            model_params["Bayesian Linear Regression"] = {
+                "alpha_1": float(blr_alpha_1),
+                "alpha_2": float(blr_alpha_2),
+                "lambda_1": float(blr_lambda_1),
+                "lambda_2": float(blr_lambda_2),
+            }
         
         if 'Gradient Boosting' in forecast_methods:
             st.markdown("**Gradient Boosting**")
@@ -2091,6 +2371,13 @@ if data_source == "Forecasting":
         
         if 'SARIMA' in forecast_methods:
             st.markdown("**SARIMA**")
+            sarima_use_auto = st.checkbox(
+                "Use auto-ARIMA parameter proposal",
+                value=True,
+                key="sarima_use_auto",
+                help="Automatically propose (p,d,q)x(P,D,Q,s) before fitting SARIMA.",
+            )
+            st.text("Manual Order (used when auto is off)")
             st.text("Order (p, d, q)")
             sarima_p = st.number_input("p", min_value=0, max_value=5, value=1, step=1, key="sarima_p")
             sarima_d = st.number_input("d", min_value=0, max_value=2, value=1, step=1, key="sarima_d")
@@ -2100,9 +2387,24 @@ if data_source == "Forecasting":
             sarima_D = st.number_input("D", min_value=0, max_value=2, value=1, step=1, key="sarima_D")
             sarima_Q = st.number_input("Q", min_value=0, max_value=3, value=1, step=1, key="sarima_Q")
             sarima_s = st.number_input("s (seasonal period)", min_value=1, max_value=365, value=7, step=1, key="sarima_s")
+            st.text("Auto-ARIMA search limits")
+            sarima_p_max = st.number_input("auto p_max", min_value=1, max_value=4, value=2, step=1, key="sarima_p_max")
+            sarima_q_max = st.number_input("auto q_max", min_value=1, max_value=4, value=2, step=1, key="sarima_q_max")
+            sarima_P_max = st.number_input("auto P_max", min_value=0, max_value=2, value=1, step=1, key="sarima_P_max")
+            sarima_Q_max = st.number_input("auto Q_max", min_value=0, max_value=2, value=1, step=1, key="sarima_Q_max")
             model_params['SARIMA'] = {
+                'use_auto': bool(sarima_use_auto),
                 'order': (sarima_p, sarima_d, sarima_q),
-                'seasonal_order': (sarima_P, sarima_D, sarima_Q, sarima_s)
+                'seasonal_order': (sarima_P, sarima_D, sarima_Q, sarima_s),
+                'auto_search': {
+                    'seasonal_period': int(sarima_s),
+                    'd': int(sarima_d),
+                    'D': int(sarima_D),
+                    'p_max': int(sarima_p_max),
+                    'q_max': int(sarima_q_max),
+                    'P_max': int(sarima_P_max),
+                    'Q_max': int(sarima_Q_max),
+                }
             }
         
         if 'FBLiR' in forecast_methods and FBLIR_AVAILABLE:
@@ -2665,6 +2967,8 @@ with main_viz:
 # Process map interactions (outside of column structure for access everywhere)
 processed_bounds = None
 gdf_filtered = None
+land_mask_geom_for_aoi = None
+land_geom_global = load_global_land_geometry()
 
 if map_data['all_drawings']:
     latest_drawing = map_data['all_drawings'][-1]
@@ -2695,6 +2999,16 @@ if map_data['all_drawings']:
         # Store in session state
         st.session_state.aoi_bounds = bounds
         processed_bounds = bounds
+        aoi_eval = evaluate_aoi_land_coverage(bounds, land_geom_global)
+        st.session_state.aoi_land_ratio = float(aoi_eval["land_ratio"])
+        st.session_state.aoi_land_geom = aoi_eval["land_geom_aoi"]
+        if aoi_eval["is_non_land"]:
+            st.error("You have selected a non-land mass. Please select an appropriate land mass.")
+            st.session_state.show_selection_map = True
+            st.stop()
+        if aoi_eval["has_partial_ocean"]:
+            st.warning("data and forecasting will be carried out only for the land mass area selected")
+        land_mask_geom_for_aoi = aoi_eval["land_geom_aoi"]
 
         # Show success message and auto-switch to spatial distribution view
         if st.session_state.show_selection_map:
@@ -2708,6 +3022,25 @@ if map_data['all_drawings']:
 # If we have stored bounds, use them
 if 'aoi_bounds' in st.session_state and processed_bounds is None:
     processed_bounds = st.session_state.aoi_bounds
+if "aoi_land_geom" in st.session_state:
+    land_mask_geom_for_aoi = st.session_state.aoi_land_geom
+
+# Re-validate AOI against land mask on every run so ocean-only selections are always blocked.
+if processed_bounds is not None:
+    if land_geom_global is None:
+        st.error("You have selected a non-land mass. Please select an appropriate land mass.")
+        st.session_state.show_selection_map = True
+        st.stop()
+    aoi_eval = evaluate_aoi_land_coverage(processed_bounds, land_geom_global)
+    land_mask_geom_for_aoi = aoi_eval["land_geom_aoi"]
+    st.session_state.aoi_land_ratio = float(aoi_eval["land_ratio"])
+    st.session_state.aoi_land_geom = land_mask_geom_for_aoi
+    if aoi_eval["is_non_land"]:
+        st.error("You have selected a non-land mass. Please select an appropriate land mass.")
+        st.session_state.show_selection_map = True
+        st.stop()
+    if aoi_eval["has_partial_ocean"] and st.session_state.get("show_selection_map", False):
+        st.warning("data and forecasting will be carried out only for the land mass area selected")
 
 # Show spatial distribution content when toggled and we have AOI
 if not st.session_state.show_selection_map and processed_bounds:
@@ -2918,7 +3251,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                             if not np.isfinite(ref_sd):
                                 ref_sd = 0.0
                             values_grid, values = create_heatmap_data(
-                                gdf_date, bounds, selected_metric, reference_std=ref_sd
+                                gdf_date, bounds, selected_metric, reference_std=ref_sd, land_geom_aoi=land_mask_geom_for_aoi
                             )
                                 
                             if values_grid is not None and values:
@@ -3046,7 +3379,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 
                             if not gdf_date.empty:
                                 values_grid, values = create_heatmap_data(
-                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std
+                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std, land_geom_aoi=land_mask_geom_for_aoi
                                 )
                                     
                                 if values_grid is not None and values:
@@ -3143,7 +3476,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                             gdf_date = gdf_filtered[gdf_filtered['date'] == current_date]
                             if not gdf_date.empty:
                                 values_grid, values = create_heatmap_data(
-                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std
+                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std, land_geom_aoi=land_mask_geom_for_aoi
                                 )
                                     
                                 if values_grid is not None and values:
@@ -3202,6 +3535,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                             (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
                         )
                         gdf_aoi = gdf_filtered[mask]
+                        gdf_aoi = filter_points_to_land(gdf_aoi, land_mask_geom_for_aoi)
                             
                         if not gdf_aoi.empty:
                             if forecast_mode and selected_features:
@@ -3394,6 +3728,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                                 bounds,
                                                                 forecast_target,
                                                                 reference_std=hist_std,
+                                                                land_geom_aoi=land_mask_geom_for_aoi,
                                                             )
                                                             if values_grid is not None and heatmap_values and len(heatmap_values) > 0:
                                                                 if map_type == "Detailed":
@@ -3445,6 +3780,26 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                                     height=VIZ_FOLIUM_CELL_H,
                                                                     returned_objects=[],
                                                                 )
+                                                                # External legend below map (kept outside plot canvas).
+                                                                vmin_ext = float(np.nanmin(values_grid))
+                                                                vmax_ext = float(np.nanmax(values_grid))
+                                                                vrange_ext = vmax_ext - vmin_ext
+                                                                st.markdown(
+                                                                    f"""
+                                                                    <div style="margin-top:6px;padding:8px 10px;border:1px solid #c8d6e5;border-radius:8px;background:#ffffff;">
+                                                                      <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
+                                                                        {metric_description_hist} — {latest_date.strftime('%Y-%m-%d')}
+                                                                      </div>
+                                                                      <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#E3F2FD,#90CAF9,#42A5F5,#1E88E5,#1565C0,#0D47A1);"></div>
+                                                                      <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
+                                                                        <span>Min: {vmin_ext:.2f}</span>
+                                                                        <span>Max: {vmax_ext:.2f}</span>
+                                                                        <span>Range: {vrange_ext:.2f}</span>
+                                                                      </div>
+                                                                    </div>
+                                                                    """,
+                                                                    unsafe_allow_html=True,
+                                                                )
                                                                 st.caption(f"Latest: {latest_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points")
                                                             else:
                                                                 st.info("Insufficient spatial points for this date.")
@@ -3480,6 +3835,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                 fitted_by_method = {}
                                                 y_true_diag = np.asarray(y, dtype=float)
                                                 for method in forecast_results.keys():
+                                                    if method == "Ensemble":
+                                                        continue
                                                     try:
                                                         fitted = _fit_in_sample_predictions(
                                                             method,
@@ -3502,11 +3859,12 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                     except Exception as diag_e:
                                                         residual_diagnostics[method] = {"error": str(diag_e)}
 
-                                                if "Ensemble" in forecast_results and "Ensemble" not in residual_diagnostics:
+                                                if "Ensemble" in forecast_results:
                                                     available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
                                                     available = [np.asarray(a, dtype=float) for a in available if a is not None]
                                                     if available:
                                                         ens_fit = np.mean(np.vstack(available), axis=0)
+                                                        fitted_by_method["Ensemble"] = ens_fit
                                                         residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
                                                             y_true_diag, ens_fit, "Ensemble"
                                                         )
@@ -3516,10 +3874,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                         }
 
                                                 st.subheader("Residual diagnostics")
-                                                st.caption(
-                                                    "Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, "
-                                                    "and Shapiro-Wilk normality test."
-                                                )
+                                                st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
                                                 tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
                                                 if tab_names:
                                                     diag_tabs = st.tabs(tab_names)
@@ -3529,24 +3884,26 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                             if "error" in d:
                                                                 st.warning(d["error"])
                                                             else:
-                                                                if hasattr(st, "popover"):
-                                                                    with st.popover("Open residual test details"):
-                                                                        st.metric("Shapiro-Wilk W", f"{d['shapiro_stat']:.4f}")
-                                                                        st.metric("Shapiro p-value", f"{d['shapiro_p']:.4f}")
-                                                                        if d["shapiro_p"] < 0.05:
-                                                                            st.caption("p < 0.05 suggests residuals are not normal.")
-                                                                        else:
-                                                                            st.caption("p >= 0.05 suggests no strong evidence against normality.")
-                                                                else:
-                                                                    st.write(
-                                                                        f"Shapiro-Wilk W: {d['shapiro_stat']:.4f} | p-value: {d['shapiro_p']:.4f}"
-                                                                    )
+                                                                st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
                                                                 r1, r2 = st.columns(2)
                                                                 with r1:
                                                                     st.plotly_chart(d["qq_fig"], use_container_width=True)
                                                                 with r2:
                                                                     st.plotly_chart(d["resid_fig"], use_container_width=True)
-                                                                st.plotly_chart(d["acf_fig"], use_container_width=True)
+                                                                r3, r4 = st.columns(2)
+                                                                with r3:
+                                                                    st.plotly_chart(d["acf_fig"], use_container_width=True)
+                                                                with r4:
+                                                                    residual_ts_fig = go.Figure()
+                                                                    residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
+                                                                    residual_ts_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                                                                    residual_ts_fig.update_layout(
+                                                                        title=f"Residual time series — {m_name}",
+                                                                        xaxis_title="Index",
+                                                                        yaxis_title="Residual",
+                                                                        height=300,
+                                                                    )
+                                                                    st.plotly_chart(residual_ts_fig, use_container_width=True)
                                                 else:
                                                     st.info("Residual diagnostics unavailable for the selected models.")
 
@@ -3558,15 +3915,30 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                         "Min": float(y_hist.min()),
                                                         "Max": float(y_hist.max()),
                                                         "Std": float(y_hist.std()),
+                                                        "AIC": np.nan,
+                                                        "BIC": np.nan,
                                                     })
                                                 for method, predictions in forecast_results.items():
                                                     arr = np.asarray(predictions, dtype=float)
+                                                    fit_arr = fitted_by_method.get(method)
+                                                    k_eff = _estimate_effective_k(
+                                                        method,
+                                                        model_params,
+                                                        n_features=len(feature_names),
+                                                        n_selected_methods=max(1, len([m for m in forecast_results.keys() if m != "Ensemble"])),
+                                                    )
+                                                    if fit_arr is not None:
+                                                        aic_val, bic_val = _aic_bic_from_fit(y_true_diag, fit_arr, k_eff)
+                                                    else:
+                                                        aic_val, bic_val = (np.nan, np.nan)
                                                     summary_rows_fc.append({
                                                         "Series": f"Forecast — {method}",
                                                         "Mean": float(np.mean(arr)),
                                                         "Min": float(np.min(arr)),
                                                         "Max": float(np.max(arr)),
                                                         "Std": float(np.std(arr)),
+                                                        "AIC": aic_val,
+                                                        "BIC": bic_val,
                                                     })
                                                 st.subheader("Summary statistics")
                                                 st.dataframe(
@@ -3978,7 +4350,7 @@ with c2:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray;'>
-🎯 FAIM - Forecasting Analyzer of Ignition Metrics v1.5.3 | Built with Streamlit<br>
+🎯 FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring v1.5.3 | Built with Streamlit<br>
 Powered by NASA POWER data from Goddard Earth Sciences Data and Information Services Center (GES DISC)
 </div>
 """, unsafe_allow_html=True)
