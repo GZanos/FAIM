@@ -88,8 +88,7 @@ if data_mode == "Forecasting":
         "Linear Regression",
         "Random Forest",
         "Gradient Boosting",
-        "Prophet",
-        "SARIMA"
+        "Prophet"
     ]
     
     # ADD THIS: Add FBLiR if available
