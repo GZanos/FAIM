@@ -3,7 +3,7 @@ Integration of Fuzzy Bayesian Linear Regression (FBLiR) with FAIM
 Add this code to your wildfire_forecast_app_V1_5_1.py
 
 This adds FBLiR as an additional forecasting method alongside the existing
-Linear Regression, Random Forest, Gradient Boosting, Prophet, SARIMA, and XGBoost
+Linear Regression, Random Forest, Gradient Boosting, Prophet, and XGBoost
 """
 
 # ============================================================================
@@ -75,8 +75,7 @@ def train_forecast_models_v2_WITH_FBLIR(df, target_col, feature_cols, forecast_d
             verbose=True
         )
     
-    # Add Prophet and SARIMA if requested
-    # ... [Keep existing Prophet/SARIMA code] ...
+    # Add Prophet if requested (see main app for Prophet training code)
     
     # Train models
     results = {}
@@ -160,7 +159,6 @@ def add_fblir_to_sidebar():
         "Random Forest", 
         "Gradient Boosting",
         "Prophet",
-        "SARIMA",
         "XGBoost"
     ]
     
