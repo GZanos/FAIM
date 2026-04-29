@@ -964,21 +964,63 @@ def train_prophet(df_prophet, forecast_horizon, params=None):
     except Exception as e:
         raise Exception(f"Prophet training failed: {str(e)}")
 
-def propose_sarima_params(y_train, params=None):
-    """Auto-propose SARIMA order by lightweight AIC search."""
+def _sarima_auto_search_defaults(asp):
+    """Caps merged with sidebar auto_search (keeps Streamlit runs bounded)."""
+    asp = asp or {}
+    return {
+        "seasonal_period": int(asp.get("seasonal_period", 7)),
+        "p_max": min(int(asp.get("p_max", 3)), 4),
+        "q_max": min(int(asp.get("q_max", 3)), 4),
+        "P_max": min(int(asp.get("P_max", 2)), 2),
+        "Q_max": min(int(asp.get("Q_max", 2)), 2),
+        "max_d": min(int(asp.get("max_d", 2)), 2),
+        "max_D": min(int(asp.get("max_D", 1)), 1),
+        "max_order": int(asp.get("max_order", 12)),
+        "d": int(asp.get("d", 1)),
+        "D": int(asp.get("D", 1)),
+        "auto_mode": str(asp.get("auto_mode", "stepwise")).lower(),
+    }
+
+
+def _merged_sarima_auto(sarima_block):
+    """Full SARIMA param block from sidebar → merged auto_search dict."""
+    sb = sarima_block or {}
+    base = _sarima_auto_search_defaults(sb.get("auto_search"))
+    base.update(sb.get("auto_search") or {})
+    return base
+
+
+def propose_sarima_params(y_train, sarima_params=None):
+    """
+    Orders for SARIMAX in-sample fit / diagnostics. Uses cached orders from train_sarima when present;
+    otherwise a small statsmodels grid only (no pmdarima — avoids double stepwise search).
+    Pass the full model_params['SARIMA'] dict, not only auto_search.
+    """
+    sarima_params = sarima_params or {}
+    if sarima_params.get("_resolved_order") is not None and sarima_params.get("_resolved_seasonal_order") is not None:
+        return {
+            "order": tuple(sarima_params["_resolved_order"]),
+            "seasonal_order": tuple(sarima_params["_resolved_seasonal_order"]),
+        }
+
     y_arr = np.asarray(y_train, dtype=float).ravel()
     y_arr = y_arr[np.isfinite(y_arr)]
-    if len(y_arr) < 30:
-        return {"order": (1, 1, 1), "seasonal_order": (1, 1, 1, 7)}
-    seasonal_period = int((params or {}).get("seasonal_period", 7))
-    p_max = int((params or {}).get("p_max", 2))
-    q_max = int((params or {}).get("q_max", 2))
-    P_max = int((params or {}).get("P_max", 1))
-    Q_max = int((params or {}).get("Q_max", 1))
-    d = int((params or {}).get("d", 1))
-    D = int((params or {}).get("D", 1))
+    asp = _merged_sarima_auto(sarima_params)
+    seasonal_period = int(asp.get("seasonal_period", 7))
+
+    if len(y_arr) < 14:
+        return {"order": (1, 1, 1), "seasonal_order": (1, 1, 1, max(7, seasonal_period))}
+
+    # Tight grid — bounded defaults even if user widened sliders (prevents timeouts)
+    p_max = min(int(asp.get("p_max", 2)), 2)
+    q_max = min(int(asp.get("q_max", 2)), 2)
+    P_max = min(int(asp.get("P_max", 1)), 1)
+    Q_max = min(int(asp.get("Q_max", 1)), 1)
+    d = min(int(asp.get("d", 1)), 1)
+    D = min(int(asp.get("D", 1)), 1)
     best = {"aic": np.inf, "order": (1, d, 1), "seasonal_order": (1, D, 1, seasonal_period)}
     from statsmodels.tsa.statespace.sarimax import SARIMAX
+
     for p in range(p_max + 1):
         for q in range(q_max + 1):
             for P in range(P_max + 1):
@@ -999,41 +1041,89 @@ def propose_sarima_params(y_train, params=None):
                             }
                     except Exception:
                         continue
-    return {"order": best["order"], "seasonal_order": best["seasonal_order"]}
+    out = {"order": best["order"], "seasonal_order": best["seasonal_order"]}
+    sarima_params["_resolved_order"] = out["order"]
+    sarima_params["_resolved_seasonal_order"] = out["seasonal_order"]
+    return out
 
 
 def train_sarima(y_train, forecast_horizon, params=None):
-    """Train SARIMA model"""
+    """
+    Forecast horizon with SARIMA. When auto is on: one pmdarima stepwise fit + predict (fast).
+    If pmdarima fails or grid mode: small statsmodels grid via propose_sarima_params + one SARIMAX fit.
+    """
     try:
         from statsmodels.tsa.statespace.sarimax import SARIMAX
         import warnings
-        warnings.filterwarnings('ignore')
-        
+        warnings.filterwarnings("ignore")
+
         if params is None:
             params = {}
+        y = np.asarray(y_train, dtype=float).ravel()
+        y = y[np.isfinite(y)]
+
         if params.get("use_auto", True):
-            proposed = propose_sarima_params(y_train, params.get("auto_search"))
+            asp = _merged_sarima_auto(params)
+            auto_mode = asp.get("auto_mode", "stepwise")
+
+            if auto_mode != "grid":
+                try:
+                    from pmdarima import auto_arima
+
+                    seasonal_period = int(asp.get("seasonal_period", 7))
+                    seasonal = seasonal_period > 1
+                    m = int(seasonal_period) if seasonal else 1
+                    fit = auto_arima(
+                        y,
+                        seasonal=seasonal,
+                        m=m if seasonal else 1,
+                        stepwise=True,
+                        suppress_warnings=True,
+                        error_action="ignore",
+                        max_p=asp["p_max"],
+                        max_q=asp["q_max"],
+                        max_P=asp["P_max"],
+                        max_Q=asp["Q_max"],
+                        max_d=asp["max_d"],
+                        max_D=asp["max_D"] if seasonal else 0,
+                        max_order=asp["max_order"],
+                        information_criterion="aicc",
+                        trace=False,
+                        n_jobs=1,
+                    )
+                    order = tuple(int(x) for x in fit.order)
+                    so_raw = getattr(fit, "seasonal_order", None)
+                    if so_raw is not None and len(so_raw) >= 4:
+                        seasonal_order = tuple(int(x) for x in so_raw)
+                    else:
+                        seasonal_order = (0, 0, 0, m if seasonal else 1)
+                    params["_resolved_order"] = order
+                    params["_resolved_seasonal_order"] = seasonal_order
+                    pred = fit.predict(n_periods=int(forecast_horizon))
+                    return np.asarray(pred, dtype=float).ravel()
+                except Exception:
+                    pass
+
+            proposed = propose_sarima_params(y_train, params)
             order = proposed.get("order", (1, 1, 1))
             seasonal_order = proposed.get("seasonal_order", (1, 1, 1, 7))
         else:
             order = params.get("order", (1, 1, 1))
             seasonal_order = params.get("seasonal_order", (1, 1, 1, 7))
-        
-        # Fit SARIMA model with seasonal components
+            params["_resolved_order"] = order
+            params["_resolved_seasonal_order"] = seasonal_order
+
         model = SARIMAX(
             y_train,
             order=order,
             seasonal_order=seasonal_order,
             enforce_stationarity=False,
-            enforce_invertibility=False
+            enforce_invertibility=False,
         )
-        
         fitted_model = model.fit(disp=False)
-        
-        # Forecast
         predictions = fitted_model.forecast(steps=forecast_horizon)
-        return predictions.values
-        
+        return np.asarray(predictions, dtype=float).ravel()
+
     except ImportError:
         raise ImportError("statsmodels is not installed. Install with: pip install statsmodels")
     except Exception as e:
@@ -1633,7 +1723,7 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
 
         mp = model_params.get("SARIMA") or {}
         if mp.get("use_auto", True):
-            proposed = propose_sarima_params(y_arr, mp.get("auto_search"))
+            proposed = propose_sarima_params(y_arr, mp)
             order = proposed.get("order", (1, 1, 1))
             seasonal_order = proposed.get("seasonal_order", (1, 1, 1, 7))
         else:
@@ -2387,11 +2477,29 @@ if data_source == "Forecasting":
             sarima_D = st.number_input("D", min_value=0, max_value=2, value=1, step=1, key="sarima_D")
             sarima_Q = st.number_input("Q", min_value=0, max_value=3, value=1, step=1, key="sarima_Q")
             sarima_s = st.number_input("s (seasonal period)", min_value=1, max_value=365, value=7, step=1, key="sarima_s")
-            st.text("Auto-ARIMA search limits")
-            sarima_p_max = st.number_input("auto p_max", min_value=1, max_value=4, value=2, step=1, key="sarima_p_max")
-            sarima_q_max = st.number_input("auto q_max", min_value=1, max_value=4, value=2, step=1, key="sarima_q_max")
-            sarima_P_max = st.number_input("auto P_max", min_value=0, max_value=2, value=1, step=1, key="sarima_P_max")
-            sarima_Q_max = st.number_input("auto Q_max", min_value=0, max_value=2, value=1, step=1, key="sarima_Q_max")
+            sarima_auto_mode = st.selectbox(
+                "Auto order search",
+                ["stepwise", "grid"],
+                index=0,
+                key="sarima_auto_mode",
+                help="stepwise: pmdarima (fast, recommended for Streamlit). grid: exhaustive statsmodels search (slow; may timeout).",
+            )
+            st.text("Auto-ARIMA search limits (pmdarima / fallback grid)")
+            sarima_p_max = st.number_input("auto p_max", min_value=1, max_value=4, value=3, step=1, key="sarima_p_max")
+            sarima_q_max = st.number_input("auto q_max", min_value=1, max_value=4, value=3, step=1, key="sarima_q_max")
+            sarima_P_max = st.number_input("auto P_max", min_value=0, max_value=2, value=2, step=1, key="sarima_P_max")
+            sarima_Q_max = st.number_input("auto Q_max", min_value=0, max_value=2, value=2, step=1, key="sarima_Q_max")
+            sarima_max_order = st.number_input(
+                "max_order (sum p+q+P+Q cap)",
+                min_value=5,
+                max_value=20,
+                value=12,
+                step=1,
+                key="sarima_max_order",
+                help="Lower values run faster on Streamlit Cloud.",
+            )
+            sarima_max_d = st.number_input("max_d", min_value=0, max_value=2, value=2, step=1, key="sarima_max_d")
+            sarima_max_D = st.number_input("max_D (seasonal)", min_value=0, max_value=1, value=1, step=1, key="sarima_max_D")
             model_params['SARIMA'] = {
                 'use_auto': bool(sarima_use_auto),
                 'order': (sarima_p, sarima_d, sarima_q),
@@ -2404,6 +2512,10 @@ if data_source == "Forecasting":
                     'q_max': int(sarima_q_max),
                     'P_max': int(sarima_P_max),
                     'Q_max': int(sarima_Q_max),
+                    'max_order': int(sarima_max_order),
+                    'max_d': int(sarima_max_d),
+                    'max_D': int(sarima_max_D),
+                    'auto_mode': str(sarima_auto_mode),
                 }
             }
         
