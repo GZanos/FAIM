@@ -15,6 +15,10 @@ import plotly.io as pio
 from io import StringIO, BytesIO
 import json
 import html as html_module
+import re
+from pathlib import Path
+
+import streamlit.components.v1 as components
 from sklearn.linear_model import LinearRegression
 from sklearn.linear_model import BayesianRidge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -88,10 +92,147 @@ try:
 except ImportError:
     GUIDE_MARKDOWN = "**Guide text not found.** Add `faim_guide_markdown.py` next to the app."
 
+_APP_DIR = Path(__file__).resolve().parent
+_GUIDES_DIR = _APP_DIR / "Guides"
+_GUIDE_FBLIR_CHART = _GUIDES_DIR / "fblir_flowchart.png"
+_GUIDE_VIDEO_NASA = _GUIDES_DIR / "Video 1.mov"
+_GUIDE_VIDEO_FORECAST = _GUIDES_DIR / "Video 2.mov"
+
+# Default Guide Helper videos (unlisted YouTube). Override via secrets / env if links change.
+_DEFAULT_GUIDE_YT_NASA = "https://www.youtube.com/watch?v=EpOL1qipZKk"
+_DEFAULT_GUIDE_YT_FORECAST = "https://www.youtube.com/watch?v=1cc4jNZHrAk"
+
+
+def _secret_or_env(secret_key: str, env_key: str):
+    """Read Streamlit secret or process env (for assets too large to commit to GitHub)."""
+    v = None
+    try:
+        v = st.secrets.get(secret_key)
+    except Exception:
+        pass
+    if v is None or (isinstance(v, str) and not str(v).strip()):
+        v = os.environ.get(env_key)
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _video_format_for_source(src: str) -> str:
+    s = src.lower().split("?", 1)[0]
+    if s.endswith(".mov"):
+        return "video/quicktime"
+    if s.endswith(".webm"):
+        return "video/webm"
+    return "video/mp4"
+
+
+def _youtube_video_id(url: str):
+    """Extract 11-char YouTube id from watch, youtu.be, or embed URLs."""
+    if not url or not isinstance(url, str):
+        return None
+    u = url.strip()
+    m = re.search(
+        r"(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([A-Za-z0-9_-]{11})",
+        u,
+    )
+    return m.group(1) if m else None
+
+
+def _render_youtube_embed(watch_or_embed_url: str, height: int = 420):
+    """YouTube watch URLs are pages, not media files — embed the player (muted autoplay where allowed)."""
+    vid = _youtube_video_id(watch_or_embed_url)
+    if not vid:
+        st.warning("Could not parse that YouTube link.")
+        return
+    src = (
+        f"https://www.youtube-nocookie.com/embed/{vid}"
+        "?mute=1&autoplay=1&playsinline=1&rel=0&modestbranding=1"
+    )
+    components.html(
+        f'<iframe width="100%" height="{height}" src="{html_module.escape(src)}" '
+        'title="Guide video" frameborder="0" '
+        'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
+        "referrerpolicy=\"strict-origin-when-cross-origin\" "
+        "allowfullscreen></iframe>",
+        height=height + 24,
+        scrolling=True,
+    )
+
+
+def _render_guide_video(local_path: Path, secret_key: str, env_key: str, fallback_youtube_url: str | None):
+    """Prefer local file; else URL from secrets/env; else default YouTube (embed). Direct MP4/MOV URLs use st.video."""
+    url = _secret_or_env(secret_key, env_key)
+    if local_path.is_file():
+        st.video(
+            str(local_path),
+            format=_video_format_for_source(str(local_path)),
+            muted=True,
+            autoplay=True,
+        )
+        return
+    if url and _youtube_video_id(url):
+        _render_youtube_embed(url)
+        return
+    if url:
+        st.video(
+            url,
+            format=_video_format_for_source(url),
+            muted=True,
+            autoplay=True,
+        )
+        return
+    if fallback_youtube_url and _youtube_video_id(fallback_youtube_url):
+        _render_youtube_embed(fallback_youtube_url)
+        return
+    st.info(
+        "No guide video available. Add a local file in **`Guides/`**, set **`"
+        + secret_key
+        + "`** in Streamlit secrets (or **`"
+        + env_key
+        + "`** in the environment), or use the built-in default YouTube links in the app."
+    )
+
+
 if hasattr(st, "dialog"):
 
     @st.dialog("Intelligence Wildfire Forecaster (IWFR) — How to use", width="large")
     def faim_howto_dialog():
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("NASA POWER API Functions Guide", use_container_width=True, key="howto_video_nasa"):
+                st.session_state["_howto_video"] = "nasa"
+        with c2:
+            if st.button("Forecasting Guide", use_container_width=True, key="howto_video_forecast"):
+                st.session_state["_howto_video"] = "forecast"
+
+        choice = st.session_state.get("_howto_video")
+        if choice == "nasa":
+            _render_guide_video(
+                _GUIDE_VIDEO_NASA,
+                secret_key="guides_video_nasa_url",
+                env_key="GUIDES_VIDEO_NASA_URL",
+                fallback_youtube_url=_DEFAULT_GUIDE_YT_NASA,
+            )
+        elif choice == "forecast":
+            _render_guide_video(
+                _GUIDE_VIDEO_FORECAST,
+                secret_key="guides_video_forecast_url",
+                env_key="GUIDES_VIDEO_FORECAST_URL",
+                fallback_youtube_url=_DEFAULT_GUIDE_YT_FORECAST,
+            )
+        else:
+            st.caption("Tip: use the buttons above to play the NASA POWER or Forecasting guide videos (muted).")
+
+        if _GUIDE_FBLIR_CHART.is_file():
+            st.image(
+                str(_GUIDE_FBLIR_CHART),
+                caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                use_container_width=True,
+            )
+        else:
+            st.warning(f"Missing FBLiR diagram file: `{_GUIDE_FBLIR_CHART}`")
+
         st.markdown(GUIDE_MARKDOWN)
 
 else:
