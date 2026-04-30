@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import time
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 from io import StringIO, BytesIO
 import json
 import html as html_module
@@ -53,6 +54,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Match Streamlit dark UI: native Plotly dark template (avoids white plot + light text).
+pio.templates.default = "plotly_dark"
 
 # ----- Optional demo access gate: only people with the password can use the app -----
 # Set password via: Streamlit Cloud "Secrets" (demo_password) or env var DEMO_PASSWORD.
@@ -707,12 +711,12 @@ def create_distribution_plot(values, metric_name, metric_description):
         yaxis_title="Frequency",
         height=400,
         showlegend=False,
-        plot_bgcolor='white',
-        font=dict(size=12)
+        template="plotly_dark",
+        font=dict(size=12),
     )
-    
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+
+    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor="rgba(255,255,255,0.12)")
+    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor="rgba(255,255,255,0.12)")
     
     return fig
 
@@ -3177,7 +3181,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         dist_fig = create_distribution_plot(values, selected_metric, metric_description)
                                         if dist_fig:
                                             dist_fig.update_layout(height=480, margin=dict(t=50, b=40))
-                                            st.plotly_chart(dist_fig, use_container_width=True)
+                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
                                     summary_sd = [{
                                         "Date": selected_date.strftime("%Y-%m-%d"),
                                         "Metric": selected_metric,
@@ -3311,7 +3315,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
                                         dist_fig = create_distribution_plot(values, selected_metric, metric_description)
                                         if dist_fig:
-                                            st.plotly_chart(dist_fig, use_container_width=True)
+                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
                                 
                             # Auto-advance frame
                             time.sleep(animation_speed)
@@ -3561,7 +3565,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                         margin=dict(t=50, b=40),
                                                         hovermode='x unified',
                                                     )
-                                                    st.plotly_chart(fig, use_container_width=True)
+                                                    st.plotly_chart(fig, use_container_width=True, theme=None)
 
                                                 with row1c2:
                                                     st.subheader("Spatial — latest historical")
@@ -3667,7 +3671,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                 with row2c1:
                                                     st.subheader("Historical ACF")
                                                     if acf_fig_fc is not None:
-                                                        st.plotly_chart(acf_fig_fc, use_container_width=True)
+                                                        st.plotly_chart(acf_fig_fc, use_container_width=True, theme=None)
                                                     else:
                                                         st.info("Not enough historical points for ACF (need more than 14 days).")
                                                 with row2c2:
@@ -3681,7 +3685,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                             height=420,
                                                             margin=dict(t=50, b=40),
                                                         )
-                                                        st.plotly_chart(dist_fig_fc, use_container_width=True)
+                                                        st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
                                                     else:
                                                         st.info("No distribution to show.")
 
@@ -3742,12 +3746,12 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                                 st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
                                                                 r1, r2 = st.columns(2)
                                                                 with r1:
-                                                                    st.plotly_chart(d["qq_fig"], use_container_width=True)
+                                                                    st.plotly_chart(d["qq_fig"], use_container_width=True, theme=None)
                                                                 with r2:
-                                                                    st.plotly_chart(d["resid_fig"], use_container_width=True)
+                                                                    st.plotly_chart(d["resid_fig"], use_container_width=True, theme=None)
                                                                 r3, r4 = st.columns(2)
                                                                 with r3:
-                                                                    st.plotly_chart(d["acf_fig"], use_container_width=True)
+                                                                    st.plotly_chart(d["acf_fig"], use_container_width=True, theme=None)
                                                                 with r4:
                                                                     residual_ts_fig = go.Figure()
                                                                     residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
@@ -3758,7 +3762,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                                         yaxis_title="Residual",
                                                                         height=300,
                                                                     )
-                                                                    st.plotly_chart(residual_ts_fig, use_container_width=True)
+                                                                    st.plotly_chart(residual_ts_fig, use_container_width=True, theme=None)
                                                 else:
                                                     st.info("Residual diagnostics unavailable for the selected models.")
 
@@ -3869,7 +3873,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                             labels={'date': 'Date', selected_metric: AVAILABLE_PARAMETERS.get(selected_metric, selected_metric)}
                                         )
                                         fig.update_layout(height=480, margin=dict(t=50, b=40))
-                                        st.plotly_chart(fig, use_container_width=True)
+                                        st.plotly_chart(fig, use_container_width=True, theme=None)
                                     with ts1b:
                                         st.subheader("Spatial — latest day")
                                         if values_grid is not None and heatmap_values:
@@ -3943,7 +3947,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     with ts2a:
                                         st.subheader("ACF")
                                         if acf_ts is not None:
-                                            st.plotly_chart(acf_ts, use_container_width=True)
+                                            st.plotly_chart(acf_ts, use_container_width=True, theme=None)
                                         else:
                                             st.info("Not enough historical points for ACF (need more than 14 days).")
                                     with ts2b:
@@ -3956,7 +3960,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                 height=420,
                                                 margin=dict(t=50, b=40),
                                             )
-                                            st.plotly_chart(dist_fig, use_container_width=True)
+                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
                                         else:
                                             st.info("No distribution to show.")
 
