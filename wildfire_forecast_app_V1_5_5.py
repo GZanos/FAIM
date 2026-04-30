@@ -72,20 +72,72 @@ st.markdown(
       [data-testid="stMarkdownContainer"], .stMetric, .stButton, .stSelectbox, .stSlider, .stTextInput {
         color: #0f172a;
       }
+      /* Inputs/selects/date fields: force light readable controls */
+      .stTextInput input,
+      .stTextArea textarea,
+      .stNumberInput input,
+      .stDateInput input,
+      .stTimeInput input,
+      .stSelectbox div[data-baseweb="select"] > div,
+      .stMultiSelect div[data-baseweb="select"] > div {
+        background: #ffffff !important;
+        color: #0f172a !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 10px !important;
+        box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.06) !important;
+      }
+      .stTextInput input::placeholder,
+      .stTextArea textarea::placeholder,
+      .stNumberInput input::placeholder,
+      .stDateInput input::placeholder {
+        color: #64748b !important;
+        opacity: 1 !important;
+      }
+      .stSelectbox span, .stMultiSelect span, .stDateInput label, .stTextInput label,
+      .stNumberInput label, .stRadio label, .stCheckbox label, .stSlider label {
+        color: #0f172a !important;
+        font-weight: 600 !important;
+      }
+      /* Dropdown menu list */
+      div[data-baseweb="popover"] {
+        background: #ffffff !important;
+        color: #0f172a !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.14) !important;
+      }
+      /* Buttons */
+      .stButton button {
+        background: linear-gradient(180deg, #3b82f6, #2563eb) !important;
+        color: #ffffff !important;
+        border: 1px solid #1d4ed8 !important;
+        border-radius: 10px !important;
+        box-shadow: 0 3px 8px rgba(37, 99, 235, 0.30) !important;
+        font-weight: 700 !important;
+      }
+      .stButton button:hover {
+        filter: brightness(1.02);
+      }
       [data-testid="stPlotlyChart"] {
         background: #ffffff;
-        border: 1px solid #dbe2ea;
-        border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.10);
-        padding: 6px;
+        border: 1px solid #cfd8e3;
+        border-radius: 14px;
+        box-shadow: 0 10px 26px rgba(15, 23, 42, 0.12), 0 2px 8px rgba(15, 23, 42, 0.07);
+        padding: 8px;
       }
       [data-testid="stDataFrame"], [data-testid="stTable"] {
         border: 1px solid #dbe2ea;
-        border-radius: 10px;
-        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.07);
+        border-radius: 12px;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.10), 0 1px 5px rgba(15, 23, 42, 0.06);
       }
       .stAlert, [data-testid="stExpander"] {
-        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+        border: 1px solid #dbe2ea;
+        border-radius: 12px;
+        box-shadow: 0 7px 18px rgba(15, 23, 42, 0.08);
+      }
+      [data-testid="stExpander"] summary, h1, h2, h3 {
+        color: #0b1736 !important;
+        text-shadow: 0 1px 1px rgba(255, 255, 255, 0.65), 0 1px 2px rgba(15, 23, 42, 0.10);
       }
     </style>
     """,
@@ -130,6 +182,29 @@ pio.templates["iwfr_white"] = go.layout.Template(
     )
 )
 pio.templates.default = "iwfr_white"
+
+# Safety net: enforce readable light chart styling before render.
+_original_plotly_chart = st.plotly_chart
+
+
+def _plotly_chart_light(fig, *args, **kwargs):
+    try:
+        if isinstance(fig, go.Figure):
+            fig.update_layout(
+                template="iwfr_white",
+                paper_bgcolor="white",
+                plot_bgcolor="white",
+                font=dict(color="#0f172a"),
+                legend=dict(bgcolor="rgba(255,255,255,0.92)", bordercolor="#cbd5e1", borderwidth=1),
+            )
+            fig.update_xaxes(showline=True, linecolor="#334155", linewidth=1, mirror=True, gridcolor="#e5e7eb", zeroline=False)
+            fig.update_yaxes(showline=True, linecolor="#334155", linewidth=1, mirror=True, gridcolor="#e5e7eb", zeroline=False)
+    except Exception:
+        pass
+    return _original_plotly_chart(fig, *args, **kwargs)
+
+
+st.plotly_chart = _plotly_chart_light
 
 # ----- Optional demo access gate: only people with the password can use the app -----
 # Set password via: Streamlit Cloud "Secrets" (demo_password) or env var DEMO_PASSWORD.
