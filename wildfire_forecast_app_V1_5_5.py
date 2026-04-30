@@ -48,7 +48,7 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
 
 # Configure page
 st.set_page_config(
-    page_title="FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring",
+    page_title="Intelligence Wildfire Forecaster (IWFR)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -86,7 +86,7 @@ except ImportError:
 
 if hasattr(st, "dialog"):
 
-    @st.dialog("FAIM — How to use", width="large")
+    @st.dialog("Intelligence Wildfire Forecaster (IWFR) — How to use", width="large")
     def faim_howto_dialog():
         st.markdown(GUIDE_MARKDOWN)
 
@@ -96,7 +96,7 @@ else:
         st.sidebar.warning("Upgrade Streamlit to 1.33+ for the guide popup.")
 
 # Title and description
-st.title("🎯 FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring")
+st.title("🎯 Intelligence Wildfire Forecaster (IWFR)")
 st.markdown("""
 Advanced meteorological forecasting and fire risk analysis platform.
 
@@ -1751,7 +1751,7 @@ def _build_forecast_pdf_report_bytes(payload):
         story.append(img)
         story.append(Spacer(1, 0.22 * cm))
 
-    add_title("FAIM Forecast Report")
+    add_title("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
     if payload.get("plain_summary"):
         add_para(payload["plain_summary"])
     if payload.get("insights_md"):
@@ -1871,7 +1871,7 @@ def _build_forecast_pdf_report_bytes_pillow(payload):
         page.paste(img, (margin, y))
         y += img.height + 18
 
-    write_line("FAIM Forecast Report")
+    write_line("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
     write_line("-" * 40)
     for ln in str(payload.get("plain_summary", "")).split("\n"):
         if ln.strip():
@@ -2378,7 +2378,7 @@ def get_chatbot_response(user_message):
         # General greetings
         'greeting': {
             'patterns': ['hello', 'hi', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening'],
-            'response': """Hello! 👋 I'm your FAIM Assistant. I can help you learn how to use the app!
+            'response': """Hello! 👋 I'm your IWFR Assistant. I can help you learn how to use the app!
             
 **What I can help with:**
 - How to use forecasting features
@@ -2634,9 +2634,9 @@ Or ask me anything else about the app!"""
 
 if hasattr(st, "dialog"):
 
-    @st.dialog("🤖 FAIM Assistant", width="large")
+    @st.dialog("🤖 IWFR Assistant", width="large")
     def faim_assistant_dialog():
-        st.caption("Tips and how-to for FAIM. Close with the dialog X when you are done.")
+        st.caption("Tips and how-to for Intelligence Wildfire Forecaster (IWFR). Close with the dialog X when you are done.")
         chat_messages_container = st.container(height=420)
         with chat_messages_container:
             for message in st.session_state.chat_history:
@@ -2661,7 +2661,7 @@ if hasattr(st, "dialog"):
                 st.session_state.chat_history = [
                     {
                         "role": "assistant",
-                        "content": "👋 Hello! I'm your FAIM Assistant. I can help you learn how to use the app. Ask me anything!",
+                        "content": "👋 Hello! I'm your IWFR Assistant. I can help you learn how to use the app. Ask me anything!",
                     }
                 ]
                 st.rerun()
@@ -2692,7 +2692,7 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = [
         {
             "role": "assistant",
-            "content": "👋 Hello! I'm your FAIM Assistant. I can help you learn how to use the app. Ask me anything!",
+            "content": "👋 Hello! I'm your IWFR Assistant. I can help you learn how to use the app. Ask me anything!",
         }
     ]
 
@@ -4203,7 +4203,7 @@ with c2:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray;'>
-🎯 FAIM - Forecasting Analyzer of Wildfire Intelligence and Monitoring v1.5.3 | Built with Streamlit<br>
+🎯 Intelligence Wildfire Forecaster (IWFR) v1.5.3 | Built with Streamlit<br>
 Powered by NASA POWER data from Goddard Earth Sciences Data and Information Services Center (GES DISC)
 </div>
 """, unsafe_allow_html=True)
