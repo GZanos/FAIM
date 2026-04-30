@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import time
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 from io import StringIO, BytesIO
 import json
 import html as html_module
@@ -53,6 +54,82 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Global white UI + consistent Plotly styling (readable on light background).
+st.markdown(
+    """
+    <style>
+      .stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+        background: #ffffff;
+      }
+      [data-testid="stSidebar"] {
+        background: #f8fafc;
+        border-right: 1px solid #e5e7eb;
+      }
+      [data-testid="stSidebar"] * {
+        color: #0f172a;
+      }
+      [data-testid="stMarkdownContainer"], .stMetric, .stButton, .stSelectbox, .stSlider, .stTextInput {
+        color: #0f172a;
+      }
+      [data-testid="stPlotlyChart"] {
+        background: #ffffff;
+        border: 1px solid #dbe2ea;
+        border-radius: 12px;
+        box-shadow: 0 4px 12px rgba(15, 23, 42, 0.10);
+        padding: 6px;
+      }
+      [data-testid="stDataFrame"], [data-testid="stTable"] {
+        border: 1px solid #dbe2ea;
+        border-radius: 10px;
+        box-shadow: 0 3px 10px rgba(15, 23, 42, 0.07);
+      }
+      .stAlert, [data-testid="stExpander"] {
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06);
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+pio.templates["iwfr_white"] = go.layout.Template(
+    layout=go.Layout(
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        font=dict(color="#0f172a", size=12),
+        title=dict(font=dict(color="#0f172a")),
+        legend=dict(
+            bgcolor="rgba(255,255,255,0.92)",
+            bordercolor="#cbd5e1",
+            borderwidth=1,
+            font=dict(color="#0f172a"),
+        ),
+        margin=dict(t=60, b=50, l=60, r=30),
+        xaxis=dict(
+            showline=True,
+            linewidth=1,
+            linecolor="#334155",
+            mirror=True,
+            showgrid=True,
+            gridcolor="#e5e7eb",
+            zeroline=False,
+            tickfont=dict(color="#0f172a"),
+            title_font=dict(color="#0f172a"),
+        ),
+        yaxis=dict(
+            showline=True,
+            linewidth=1,
+            linecolor="#334155",
+            mirror=True,
+            showgrid=True,
+            gridcolor="#e5e7eb",
+            zeroline=False,
+            tickfont=dict(color="#0f172a"),
+            title_font=dict(color="#0f172a"),
+        ),
+    )
+)
+pio.templates.default = "iwfr_white"
 
 # ----- Optional demo access gate: only people with the password can use the app -----
 # Set password via: Streamlit Cloud "Secrets" (demo_password) or env var DEMO_PASSWORD.
