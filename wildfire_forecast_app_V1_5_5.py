@@ -94,13 +94,52 @@ except ImportError:
 
 _APP_DIR = Path(__file__).resolve().parent
 _GUIDES_DIR = _APP_DIR / "Guides"
-_GUIDE_FBLIR_CHART = _GUIDES_DIR / "fblir_flowchart.png"
 _GUIDE_VIDEO_NASA = _GUIDES_DIR / "Video 1.mov"
 _GUIDE_VIDEO_FORECAST = _GUIDES_DIR / "Video 2.mov"
 
 # Default Guide Helper videos (unlisted YouTube). Override via secrets / env if links change.
 _DEFAULT_GUIDE_YT_NASA = "https://www.youtube.com/watch?v=EpOL1qipZKk"
 _DEFAULT_GUIDE_YT_FORECAST = "https://www.youtube.com/watch?v=1cc4jNZHrAk"
+
+_FBLIR_DIAGRAM_NAMES = (
+    "fblir_flowchart.png",
+    "FBLiR_flowchart.png",
+    "FBLIR_flowchart.png",
+)
+
+
+def _resolve_fblir_diagram_path():
+    """Find diagram on disk (Linux case-sensitive; layout differs local vs Cloud).
+
+    On GitHub the PNG is often committed next to `faim_guide_markdown.py` (repo root),
+    while `wildfire_forecast_app_*.py` may live in a subfolder — so we resolve via the
+    guide module path and the repo parent, not only `Guides/`.
+    """
+    try:
+        import faim_guide_markdown as _fgm
+
+        guide_dir = Path(_fgm.__file__).resolve().parent
+        for name in _FBLIR_DIAGRAM_NAMES:
+            p = guide_dir / name
+            if p.is_file():
+                return p
+    except Exception:
+        pass
+
+    search_dirs = (
+        _GUIDES_DIR,
+        _APP_DIR,
+        _APP_DIR.parent,
+        _APP_DIR / "assets",
+        _APP_DIR / "static",
+        _APP_DIR / "images",
+    )
+    for d in search_dirs:
+        for name in _FBLIR_DIAGRAM_NAMES:
+            p = d / name
+            if p.is_file():
+                return p
+    return None
 
 
 def _secret_or_env(secret_key: str, env_key: str):
@@ -224,14 +263,27 @@ if hasattr(st, "dialog"):
         else:
             st.caption("Tip: use the buttons above to play the NASA POWER or Forecasting guide videos (muted).")
 
-        if _GUIDE_FBLIR_CHART.is_file():
+        diagram_path = _resolve_fblir_diagram_path()
+        diagram_url = _secret_or_env("guides_fblir_diagram_url", "GUIDES_FBLIR_DIAGRAM_URL")
+        if diagram_path is not None:
             st.image(
-                str(_GUIDE_FBLIR_CHART),
+                str(diagram_path),
+                caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                use_container_width=True,
+            )
+        elif diagram_url:
+            st.image(
+                diagram_url,
                 caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
                 use_container_width=True,
             )
         else:
-            st.warning(f"Missing FBLiR diagram file: `{_GUIDE_FBLIR_CHART}`")
+            st.warning(
+                "FBLiR diagram image not found in the deployed app. "
+                "Commit **`Guides/fblir_flowchart.png`** (exact name, that folder) to the branch Streamlit deploys, "
+                "or set secret **`guides_fblir_diagram_url`** / env **`GUIDES_FBLIR_DIAGRAM_URL`** to a direct image URL "
+                "(e.g. `https://raw.githubusercontent.com/<user>/<repo>/<branch>/Guides/fblir_flowchart.png`)."
+            )
 
         st.markdown(GUIDE_MARKDOWN)
 
