@@ -88,17 +88,26 @@ if _demo_password:
         st.stop()
 
 try:
-    from faim_guide_markdown import (
-        GUIDE_MARKDOWN,
-        GUIDE_MARKDOWN_PREFIX,
-        GUIDE_FBLIR_SECTION_HEADER_AND_INTRO,
-        GUIDE_MARKDOWN_FBLIR_TAIL,
-    )
+    from faim_guide_markdown import GUIDE_MARKDOWN
 except ImportError:
     GUIDE_MARKDOWN = "**Guide text not found.** Add `faim_guide_markdown.py` next to the app."
-    GUIDE_MARKDOWN_PREFIX = GUIDE_MARKDOWN
-    GUIDE_FBLIR_SECTION_HEADER_AND_INTRO = ""
-    GUIDE_MARKDOWN_FBLIR_TAIL = ""
+
+_GUIDE_FBLIR_ANCHOR = "## 🎛️ FBLiR (Fuzzy Bayesian Linear Regression) Process"
+_GUIDE_FBLIR_SUB = "### How FBLiR Handles Seasonality:"
+
+
+def _split_guide_markdown_for_dialog(md: str):
+    """Split full guide so the FBLiR diagram can sit under that section (no extra imports from guide file)."""
+    i0 = md.find(_GUIDE_FBLIR_ANCHOR)
+    i1 = md.find(_GUIDE_FBLIR_SUB)
+    if i0 != -1 and i1 != -1 and i1 > i0:
+        return md[:i0].rstrip(), md[i0:i1].rstrip(), md[i1:].lstrip()
+    return md.rstrip(), "", ""
+
+
+GUIDE_MARKDOWN_PREFIX, GUIDE_FBLIR_SECTION_HEADER_AND_INTRO, GUIDE_MARKDOWN_FBLIR_TAIL = (
+    _split_guide_markdown_for_dialog(GUIDE_MARKDOWN)
+)
 
 _APP_DIR = Path(__file__).resolve().parent
 _GUIDES_DIR = _APP_DIR / "Guides"
@@ -271,40 +280,40 @@ if hasattr(st, "dialog"):
         else:
             st.caption("Tip: use the buttons above to play the NASA POWER or Forecasting guide videos (muted).")
 
-        st.markdown(GUIDE_MARKDOWN_PREFIX)
-
-        if GUIDE_FBLIR_SECTION_HEADER_AND_INTRO:
+        if GUIDE_FBLIR_SECTION_HEADER_AND_INTRO and GUIDE_MARKDOWN_FBLIR_TAIL:
+            st.markdown(GUIDE_MARKDOWN_PREFIX)
             st.markdown(GUIDE_FBLIR_SECTION_HEADER_AND_INTRO)
 
-        diagram_path = _resolve_fblir_diagram_path()
-        diagram_url = _secret_or_env("guides_fblir_diagram_url", "GUIDES_FBLIR_DIAGRAM_URL")
-        if diagram_path is not None:
-            _half1, _half2 = st.columns([1, 1], gap="small")
-            with _half1:
-                st.image(
-                    str(diagram_path),
-                    caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
-                    use_container_width=True,
+            diagram_path = _resolve_fblir_diagram_path()
+            diagram_url = _secret_or_env("guides_fblir_diagram_url", "GUIDES_FBLIR_DIAGRAM_URL")
+            if diagram_path is not None:
+                _half1, _half2 = st.columns([1, 1], gap="small")
+                with _half1:
+                    st.image(
+                        str(diagram_path),
+                        caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                        use_container_width=True,
+                    )
+                _half2.empty()
+            elif diagram_url:
+                _half1, _half2 = st.columns([1, 1], gap="small")
+                with _half1:
+                    st.image(
+                        diagram_url,
+                        caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                        use_container_width=True,
+                    )
+                _half2.empty()
+            else:
+                st.warning(
+                    "FBLiR diagram image not found in the deployed app. "
+                    "Commit **`fblir_flowchart.png`** next to `faim_guide_markdown.py` (or under **`Guides/`**), "
+                    "or set secret **`guides_fblir_diagram_url`** / env **`GUIDES_FBLIR_DIAGRAM_URL`** to a direct image URL."
                 )
-            _half2.empty()
-        elif diagram_url:
-            _half1, _half2 = st.columns([1, 1], gap="small")
-            with _half1:
-                st.image(
-                    diagram_url,
-                    caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
-                    use_container_width=True,
-                )
-            _half2.empty()
-        else:
-            st.warning(
-                "FBLiR diagram image not found in the deployed app. "
-                "Commit **`fblir_flowchart.png`** next to `faim_guide_markdown.py` (or under **`Guides/`**), "
-                "or set secret **`guides_fblir_diagram_url`** / env **`GUIDES_FBLIR_DIAGRAM_URL`** to a direct image URL."
-            )
 
-        if GUIDE_MARKDOWN_FBLIR_TAIL:
             st.markdown(GUIDE_MARKDOWN_FBLIR_TAIL)
+        else:
+            st.markdown(GUIDE_MARKDOWN_PREFIX)
 
 else:
 
