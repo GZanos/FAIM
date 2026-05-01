@@ -88,12 +88,47 @@ if _demo_password:
         st.stop()
 
 try:
-    from faim_guide_markdown import GUIDE_MARKDOWN
+    from faim_guide_markdown import GUIDE_MARKDOWN as _GUIDE_MARKDOWN_RAW
 except ImportError:
-    GUIDE_MARKDOWN = "**Guide text not found.** Add `faim_guide_markdown.py` next to the app."
+    _GUIDE_MARKDOWN_RAW = "**Guide text not found.** Add `faim_guide_markdown.py` next to the app."
 
 _GUIDE_FBLIR_ANCHOR = "## 🎛️ FBLiR (Fuzzy Bayesian Linear Regression) Process"
 _GUIDE_FBLIR_SUB = "### How FBLiR Handles Seasonality:"
+
+
+def _strip_legacy_ascii_fblir_flowchart(md: str) -> str:
+    """Remove legacy STEP 1–6 ASCII diagram (fenced or plain) if still present in guide text."""
+    out = md
+    out = re.sub(
+        r"```[^\n]*\r?\n(?=[\s\S]*?STEP\s*1\s*:\s*DATA\s*PREPARATION)[\s\S]*?```\s*",
+        "",
+        out,
+        flags=re.IGNORECASE,
+    )
+    token = "STEP 1: DATA PREPARATION"
+    while token in out:
+        i = out.index(token)
+        window_start = max(0, i - 4000)
+        win = out[window_start:i]
+        j = win.rfind("┌")
+        if j == -1:
+            break
+        line_start = out.rfind("\n", 0, window_start + j) + 1
+        tail = out[i : min(len(out), i + 20000)]
+        k = tail.rfind("└")
+        if k == -1:
+            break
+        k2 = tail.find("┘", k)
+        if k2 == -1:
+            break
+        e = i + k2 + 1
+        while e < len(out) and out[e] in "\r\n":
+            e += 1
+        out = out[:line_start] + out[e:]
+    return out
+
+
+GUIDE_MARKDOWN = _strip_legacy_ascii_fblir_flowchart(_GUIDE_MARKDOWN_RAW)
 
 
 def _split_guide_markdown_for_dialog(md: str):
