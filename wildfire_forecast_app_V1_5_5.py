@@ -88,9 +88,17 @@ if _demo_password:
         st.stop()
 
 try:
-    from faim_guide_markdown import GUIDE_MARKDOWN
+    from faim_guide_markdown import (
+        GUIDE_MARKDOWN,
+        GUIDE_MARKDOWN_PREFIX,
+        GUIDE_FBLIR_SECTION_HEADER_AND_INTRO,
+        GUIDE_MARKDOWN_FBLIR_TAIL,
+    )
 except ImportError:
     GUIDE_MARKDOWN = "**Guide text not found.** Add `faim_guide_markdown.py` next to the app."
+    GUIDE_MARKDOWN_PREFIX = GUIDE_MARKDOWN
+    GUIDE_FBLIR_SECTION_HEADER_AND_INTRO = ""
+    GUIDE_MARKDOWN_FBLIR_TAIL = ""
 
 _APP_DIR = Path(__file__).resolve().parent
 _GUIDES_DIR = _APP_DIR / "Guides"
@@ -263,29 +271,40 @@ if hasattr(st, "dialog"):
         else:
             st.caption("Tip: use the buttons above to play the NASA POWER or Forecasting guide videos (muted).")
 
+        st.markdown(GUIDE_MARKDOWN_PREFIX)
+
+        if GUIDE_FBLIR_SECTION_HEADER_AND_INTRO:
+            st.markdown(GUIDE_FBLIR_SECTION_HEADER_AND_INTRO)
+
         diagram_path = _resolve_fblir_diagram_path()
         diagram_url = _secret_or_env("guides_fblir_diagram_url", "GUIDES_FBLIR_DIAGRAM_URL")
         if diagram_path is not None:
-            st.image(
-                str(diagram_path),
-                caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
-                use_container_width=True,
-            )
+            _half1, _half2 = st.columns([1, 1], gap="small")
+            with _half1:
+                st.image(
+                    str(diagram_path),
+                    caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                    use_container_width=True,
+                )
+            _half2.empty()
         elif diagram_url:
-            st.image(
-                diagram_url,
-                caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
-                use_container_width=True,
-            )
+            _half1, _half2 = st.columns([1, 1], gap="small")
+            with _half1:
+                st.image(
+                    diagram_url,
+                    caption="FBLiR pipeline (model fit layer + fuzzy inference layer)",
+                    use_container_width=True,
+                )
+            _half2.empty()
         else:
             st.warning(
                 "FBLiR diagram image not found in the deployed app. "
-                "Commit **`Guides/fblir_flowchart.png`** (exact name, that folder) to the branch Streamlit deploys, "
-                "or set secret **`guides_fblir_diagram_url`** / env **`GUIDES_FBLIR_DIAGRAM_URL`** to a direct image URL "
-                "(e.g. `https://raw.githubusercontent.com/<user>/<repo>/<branch>/Guides/fblir_flowchart.png`)."
+                "Commit **`fblir_flowchart.png`** next to `faim_guide_markdown.py` (or under **`Guides/`**), "
+                "or set secret **`guides_fblir_diagram_url`** / env **`GUIDES_FBLIR_DIAGRAM_URL`** to a direct image URL."
             )
 
-        st.markdown(GUIDE_MARKDOWN)
+        if GUIDE_MARKDOWN_FBLIR_TAIL:
+            st.markdown(GUIDE_MARKDOWN_FBLIR_TAIL)
 
 else:
 
