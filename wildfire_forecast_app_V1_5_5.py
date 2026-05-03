@@ -62,6 +62,26 @@ st.set_page_config(
 # Match Streamlit dark UI: native Plotly dark template (avoids white plot + light text).
 pio.templates.default = "plotly_dark"
 
+# Larger close control on `st.dialog` modals (easier to tap than default icon).
+st.markdown(
+    """
+    <style>
+    div[data-testid="stDialog"] header button {
+        min-width: 3rem !important;
+        min-height: 3rem !important;
+        width: 3rem !important;
+        height: 3rem !important;
+        padding: 0.35rem !important;
+    }
+    div[data-testid="stDialog"] header button svg {
+        width: 1.75rem !important;
+        height: 1.75rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ----- Optional demo access gate: only people with the password can use the app -----
 # Set password via: Streamlit Cloud "Secrets" (demo_password) or env var DEMO_PASSWORD.
 # If no password is set, everyone can access (e.g. for local run).
@@ -1738,16 +1758,19 @@ def build_forecast_export_wide(
     return out
 
 
-@st.dialog("Long forecast horizon")
+def _on_long_forecast_horizon_dismiss() -> None:
+    """Called when the user closes the long-horizon dialog (X, Esc, or click-outside)."""
+    st.session_state["long_forecast_horizon_dialog_dismissed"] = True
+
+
+@st.dialog("Long forecast horizon", on_dismiss=_on_long_forecast_horizon_dismiss)
 def _long_forecast_horizon_dialog(forecast_horizon: int, threshold_days: int) -> None:
     st.markdown(
         f"You selected a **{forecast_horizon}-day** forecast (more than **{threshold_days}** days). "
         "**Precision and skill typically decrease** as the horizon lengthens—long-range values are best treated "
         "as **indicative scenarios**, not high-confidence point predictions."
     )
-    if st.button("I understand", type="primary", key="dismiss_long_forecast_horizon_dialog"):
-        st.session_state["long_forecast_horizon_dialog_dismissed"] = True
-        st.rerun()
+    st.caption("Close this notice with the **×** in the top-right (or **Esc**).")
 
 
 def _in_sample_seasonal_baseline_fit(df_ml, forecast_target, min_train=30):
@@ -3026,6 +3049,20 @@ if st.sidebar.button("🤖 AI Assistant", use_container_width=True, key="open_ai
 
 if st.sidebar.button("📖 Guide Helper", use_container_width=True, key="open_guide_helper"):
     faim_howto_dialog()
+
+
+def _reset_faim_app() -> None:
+    """Clear session state so the app returns to a clean start (widgets reset on next run)."""
+    for k in list(st.session_state.keys()):
+        try:
+            del st.session_state[k]
+        except Exception:
+            pass
+    st.rerun()
+
+
+if st.sidebar.button("🔄 Reset App", use_container_width=True, key="reset_faim_app"):
+    _reset_faim_app()
 
 # Load or create data
 @st.cache_data
