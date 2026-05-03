@@ -95,6 +95,9 @@ except ImportError:
 _GUIDE_FBLIR_ANCHOR = "## 🎛️ FBLiR (Fuzzy Bayesian Linear Regression) Process"
 _GUIDE_FBLIR_SUB = "### How FBLiR Handles Seasonality:"
 
+# Forecast UX: show notice when horizon exceeds this many days (skill typically drops with lead time).
+LONG_FORECAST_HORIZON_WARNING_DAYS = 365
+
 
 def _strip_legacy_ascii_fblir_flowchart(md: str) -> str:
     """Remove legacy STEP 1–6 ASCII diagram (fenced or plain) if still present in guide text."""
@@ -1695,6 +1698,58 @@ def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target,
     return f"{s1}\n\n{s2}\n\n{s3}"
 
 
+def _forecast_method_export_column_name(method: str) -> str:
+    """Stable CSV column name for a forecast method (e.g. Random Forest -> forecast_Random_Forest)."""
+    base = str(method).strip().replace(" ", "_").replace("/", "_")
+    return f"forecast_{base}"
+
+
+def build_forecast_export_wide(
+    daily_avg: pd.DataFrame,
+    selected_features: list,
+    forecast_target: str,
+    future_dates,
+    forecast_results: dict,
+) -> pd.DataFrame:
+    """
+    Wide export: date | selected feature AOI means | target | one column per model | row_type.
+    Historical rows have NaN in forecast_* columns; future rows have NaN in feature/target observables.
+    """
+    feat_cols = [c for c in selected_features if c in daily_avg.columns]
+    hist_cols = ["date"] + feat_cols + [forecast_target]
+    hist = daily_avg[hist_cols].copy()
+    for m in forecast_results:
+        hist[_forecast_method_export_column_name(m)] = np.nan
+    hist["row_type"] = "historical"
+
+    fut = pd.DataFrame({"date": future_dates})
+    for c in feat_cols:
+        fut[c] = np.nan
+    fut[forecast_target] = np.nan
+    for method, pred in forecast_results.items():
+        fut[_forecast_method_export_column_name(method)] = np.asarray(pred, dtype=float)
+    fut["row_type"] = "forecast"
+
+    out = pd.concat([hist, fut], ignore_index=True)
+    out = out.sort_values("date").reset_index(drop=True)
+    fc_ordered = [_forecast_method_export_column_name(m) for m in forecast_results.keys()]
+    col_order = ["date"] + feat_cols + [forecast_target] + fc_ordered + ["row_type"]
+    out = out[[c for c in col_order if c in out.columns]]
+    return out
+
+
+@st.dialog("Long forecast horizon")
+def _long_forecast_horizon_dialog(forecast_horizon: int, threshold_days: int) -> None:
+    st.markdown(
+        f"You selected a **{forecast_horizon}-day** forecast (more than **{threshold_days}** days). "
+        "**Precision and skill typically decrease** as the horizon lengthens—long-range values are best treated "
+        "as **indicative scenarios**, not high-confidence point predictions."
+    )
+    if st.button("I understand", type="primary", key="dismiss_long_forecast_horizon_dialog"):
+        st.session_state["long_forecast_horizon_dialog_dismissed"] = True
+        st.rerun()
+
+
 def _in_sample_seasonal_baseline_fit(df_ml, forecast_target, min_train=30):
     """Fallback in-sample fitted values using rolling seasonal baseline."""
     df = df_ml[["date", forecast_target]].dropna().sort_values("date").reset_index(drop=True)
@@ -2460,7 +2515,16 @@ if data_source == "Forecasting":
         value=30,
         step=1
     )
-    
+    if forecast_horizon <= LONG_FORECAST_HORIZON_WARNING_DAYS:
+        st.session_state.pop("long_forecast_horizon_dialog_dismissed", None)
+    else:
+        st.sidebar.caption(
+            f"Horizons over **{LONG_FORECAST_HORIZON_WARNING_DAYS}** days: forecast precision usually "
+            "**decreases** the further ahead you predict."
+        )
+        if not st.session_state.get("long_forecast_horizon_dialog_dismissed"):
+            _long_forecast_horizon_dialog(forecast_horizon, LONG_FORECAST_HORIZON_WARNING_DAYS)
+
     # MODEL PARAMETERS SECTION
     st.sidebar.subheader("🎛️ Model Parameters")
     
@@ -4075,19 +4139,14 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                     "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
                                                     "residual_diagnostics": residual_diagnostics,
                                                 }
-                                            # Prepare export data
-                                            export_df = daily_avg[['date', forecast_target]].copy()
-                                            export_df['type'] = 'historical'
-                                                
-                                            for method, predictions in forecast_results.items():
-                                                method_df = pd.DataFrame({
-                                                    'date': future_dates,
-                                                    forecast_target: predictions,
-                                                    'type': f'forecast_{method}'
-                                                })
-                                                export_df = pd.concat([export_df, method_df], ignore_index=True)
-                                                
-                                            st.session_state.combined_export_data = export_df
+                                            # Prepare export data (wide: date, features, target, forecast_*, row_type)
+                                            st.session_state.combined_export_data = build_forecast_export_wide(
+                                                daily_avg,
+                                                selected_features,
+                                                forecast_target,
+                                                future_dates,
+                                                forecast_results,
+                                            )
                                                 
                                             # Store forecast frames for animation
                                             st.session_state.forecast_frames = {
@@ -4380,7 +4439,12 @@ if not st.session_state.show_selection_map and processed_bounds:
                     st.subheader("💾 Export Data")
                     
                     if forecast_mode and 'combined_export_data' in st.session_state:
-                        st.write(f"Export includes historical {forecast_target} and all forecast models")
+                        st.write(
+                            "Wide CSV: **`date`**, selected **feature** columns (AOI daily means), "
+                            f"**`{forecast_target}`** (target), one **`forecast_*`** column per model, "
+                            "and **`row_type`** (`historical` / `forecast`). "
+                            "Future rows have missing observed features and target—model outputs are in **`forecast_*`**."
+                        )
                         export_data = st.session_state.combined_export_data
                         csv_buffer = StringIO()
                         export_data.to_csv(csv_buffer, index=False)
