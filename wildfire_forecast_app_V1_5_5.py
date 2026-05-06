@@ -24,6 +24,7 @@ from sklearn.linear_model import BayesianRidge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
+from statsmodels.tsa.seasonal import STL
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -1046,21 +1047,77 @@ def prepare_ml_features(df, target_col, feature_cols, lag_days=7):
     return df_clean, feature_names
 
 
-def _apply_target_averaging(y_values, averaging_method, window_days):
+def _apply_target_smoothing(y_values, smoothing_method, window_days, dates=None):
     """Optionally smooth target series before model fitting."""
     y = np.asarray(y_values, dtype=float).ravel()
-    if averaging_method == "None (no averaging)":
+    if smoothing_method == "None (no smoothing)":
         return y, ""
+
+    if smoothing_method == "Seasonal smoothing (STL)":
+        return _apply_stl_target_smoothing(y, dates)
 
     w = int(max(2, window_days))
     s = pd.Series(y)
-    if averaging_method == "Rolling mean":
+    if smoothing_method == "Rolling mean":
         y_smooth = s.rolling(window=w, min_periods=1).mean().values
-        return np.asarray(y_smooth, dtype=float), f"Target averaging: rolling mean ({w} days)."
-    if averaging_method == "Rolling median":
+        return np.asarray(y_smooth, dtype=float), f"Target smoothing: rolling mean ({w} days)."
+    if smoothing_method == "Rolling median":
         y_smooth = s.rolling(window=w, min_periods=1).median().values
-        return np.asarray(y_smooth, dtype=float), f"Target averaging: rolling median ({w} days)."
+        return np.asarray(y_smooth, dtype=float), f"Target smoothing: rolling median ({w} days)."
+    if smoothing_method == "Exponential moving average (EMA)":
+        y_smooth = s.ewm(span=w, adjust=False, min_periods=1).mean().values
+        return np.asarray(y_smooth, dtype=float), f"Target smoothing: EMA (span={w} days)."
     return y, ""
+
+
+def _apply_stl_target_smoothing(y, dates):
+    """STL trend + seasonal (annual) for long daily series; removes irregular component."""
+    if dates is None:
+        return np.asarray(y, dtype=float), "Target smoothing: STL skipped (no dates on series)."
+
+    y = np.asarray(y, dtype=float).ravel()
+    d_raw = pd.to_datetime(pd.Series(dates, copy=False), errors="coerce")
+    if len(d_raw) != len(y):
+        return y, "Target smoothing: STL skipped (dates length mismatch)."
+
+    if not d_raw.notna().any():
+        return y, "Target smoothing: STL skipped (invalid dates)."
+
+    ok = d_raw.notna().to_numpy()
+    df = pd.DataFrame({"date": d_raw[ok].to_numpy(), "y": y[ok]}).sort_values("date")
+    df = df.drop_duplicates(subset=["date"], keep="last")
+    if df.empty:
+        return y, "Target smoothing: STL skipped (invalid dates)."
+
+    dmin, dmax = df["date"].min(), df["date"].max()
+    full_idx = pd.date_range(dmin, dmax, freq="D")
+    ser = df.set_index("date")["y"].astype(float).reindex(full_idx)
+    if ser.notna().sum() < 10:
+        return y, "Target smoothing: STL skipped (too few valid daily values)."
+
+    ser = ser.interpolate(method="linear", limit_direction="both").bfill().ffill()
+
+    period = 365
+    if len(ser) < 2 * period:
+        return np.asarray(y, dtype=float), (
+            f"Target smoothing: STL needs at least {2 * period} daily points (~2 years); "
+            "left target unchanged."
+        )
+
+    try:
+        stl = STL(ser, period=period, seasonal=15, robust=True)
+        res = stl.fit()
+        smoothed_daily = pd.Series(
+            np.asarray(res.trend, dtype=float).ravel() + np.asarray(res.seasonal, dtype=float).ravel(),
+            index=ser.index,
+        )
+        mapped = smoothed_daily.reindex(pd.DatetimeIndex(d_raw))
+        out = np.where(mapped.notna().to_numpy(), mapped.to_numpy(dtype=float), y)
+        return np.asarray(out, dtype=float), (
+            "Target smoothing: STL (trend + annual seasonality, period=365 days)."
+        )
+    except Exception:
+        return np.asarray(y, dtype=float), "Target smoothing: STL failed; left target unchanged."
 
 def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3):
     """
@@ -2555,8 +2612,8 @@ if data_source == "Forecasting":
         value=30,
         step=1
     )
-    target_averaging_method = "None (no averaging)"
-    target_averaging_window = 7
+    target_smoothing_method = "None (no smoothing)"
+    target_smoothing_window = 7
     if forecast_horizon <= LONG_FORECAST_HORIZON_WARNING_DAYS:
         st.session_state.pop("long_forecast_horizon_dialog_dismissed", None)
     else:
@@ -2689,24 +2746,35 @@ if data_source == "Forecasting":
                 "temperature": float(llm_temp),
             }
 
-        st.markdown("**Target Averaging (applies before all model fits)**")
-        target_averaging_method = st.selectbox(
-            "Target averaging (pre-fit)",
+        st.markdown("**Target smoothing (applies before all model fits)**")
+        target_smoothing_method = st.selectbox(
+            "Target smoothing (pre-fit)",
             options=[
-                "None (no averaging)",
+                "None (no smoothing)",
                 "Rolling mean",
                 "Rolling median",
+                "Exponential moving average (EMA)",
+                "Seasonal smoothing (STL)",
             ],
             index=0,
-            help="Smooth the target series before model fitting to reduce day-to-day variance.",
+            help=(
+                "Smooth the target before fitting. EMA reacts faster to shifts than rolling windows. "
+                "STL fits annual seasonality on long daily series (~2+ years recommended)."
+            ),
         )
-        if target_averaging_method != "None (no averaging)":
-            target_averaging_window = st.number_input(
-                "Averaging window (days)",
+        if target_smoothing_method == "Seasonal smoothing (STL)":
+            st.caption(
+                "STL uses period=365 days. Needs at least ~730 consecutive calendar days in range "
+                "(gaps are linearly interpolated)."
+            )
+        elif target_smoothing_method != "None (no smoothing)":
+            target_smoothing_window = st.number_input(
+                "Smoothing window (days)",
                 min_value=2,
                 max_value=60,
                 value=7,
                 step=1,
+                help="Rolling window for mean/median; EMA span (typical effective memory ~this many days).",
             )
     
     selected_metric = forecast_target
@@ -3807,14 +3875,15 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     
                                 daily_avg = daily_avg.dropna(subset=[forecast_target])
                                 daily_avg_model = daily_avg.copy()
-                                averaged_target_values, averaging_note = _apply_target_averaging(
+                                smoothed_target_values, smoothing_note = _apply_target_smoothing(
                                     daily_avg_model[forecast_target].astype(float).values,
-                                    target_averaging_method,
-                                    target_averaging_window,
+                                    target_smoothing_method,
+                                    target_smoothing_window,
+                                    dates=daily_avg_model["date"].values,
                                 )
-                                daily_avg_model[forecast_target] = averaged_target_values
-                                if averaging_note:
-                                    st.caption(averaging_note)
+                                daily_avg_model[forecast_target] = smoothed_target_values
+                                if smoothing_note:
+                                    st.caption(smoothing_note)
                                     
                                 if len(daily_avg) < 30:
                                     st.error("⚠️ Insufficient historical data. Need at least 30 days.")
