@@ -1133,10 +1133,10 @@ def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
             'k': 0.5,
             'fuzzification_factor': 0.05,
                 'symmetry_threshold': 0.4,
-            'N_chains': 1,
-            'adapt_steps': 100,
-            'burnin_steps': 100,
-            'thinning_steps': 1
+            'N_chains': 2,
+            'adapt_steps': 200,
+            'burnin_steps': 200,
+            'thinning_steps': 7
         }
     
     try:
@@ -1145,10 +1145,10 @@ def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
             # Use V2/V3: Calculate n_samples from Bayesian parameters
             # Note: n_samples is the number of posterior samples, not total MCMC steps
             # We use a reasonable calculation: base samples per chain, scaled by chains and thinning
-            adapt = int(params.get("adapt_steps", 100))
-            burnin = int(params.get("burnin_steps", 100))
-            n_chains = max(1, int(params.get("N_chains", 1)))
-            thinning = max(1, int(params.get("thinning_steps", 1)))
+            adapt = int(params.get("adapt_steps", 200))
+            burnin = int(params.get("burnin_steps", 200))
+            n_chains = max(1, int(params.get("N_chains", 2)))
+            thinning = max(1, int(params.get("thinning_steps", 7)))
             n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
             
             # Use FuzzyBayesianRegression directly to pass all parameters
@@ -1170,7 +1170,7 @@ def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
             # Fallback to original FuzzyBayesianRegressionTuned (doesn't support all parameters)
             # Use reasonable n_samples calculation
             base_samples = 500
-            n_chains = max(1, params.get('N_chains', 1))
+            n_chains = max(1, params.get('N_chains', 2))
             n_samples = min(base_samples * n_chains, 2000)  # Cap at 2000 for original version
             n_samples = max(n_samples, 100)  # Minimum
             
@@ -1851,10 +1851,10 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
     if method == "FBLiR":
         params = model_params.get("FBLiR") or {}
         if FuzzyBayesianRegression is not None:
-            adapt = int(params.get("adapt_steps", 100))
-            burnin = int(params.get("burnin_steps", 100))
-            thinning = max(1, int(params.get("thinning_steps", 1)))
-            n_chains = max(1, int(params.get("N_chains", 1)))
+            adapt = int(params.get("adapt_steps", 200))
+            burnin = int(params.get("burnin_steps", 200))
+            thinning = max(1, int(params.get("thinning_steps", 7)))
+            n_chains = max(1, int(params.get("N_chains", 2)))
             n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
             m = FuzzyBayesianRegression(
                 n_samples=n_samples,
@@ -1872,7 +1872,7 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         y_train_f = pd.Series(y_arr).iloc[:split_idx]
         X_val_f = X_scaled.iloc[split_idx:]
         y_val_f = pd.Series(y_arr).iloc[split_idx:]
-        base_samples = min(max(100, int(params.get("adapt_steps", 100)) + int(params.get("burnin_steps", 100))), 1500)
+        base_samples = min(max(100, int(params.get("adapt_steps", 200)) + int(params.get("burnin_steps", 200))), 1500)
         m = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
         m.fit(X_train_f, y_train_f, X_val_f, y_val_f)
         return np.asarray(m.predict(X_scaled), dtype=float).ravel()
@@ -2335,11 +2335,11 @@ def run_iterative_ml_forecast(
         if not FBLIR_AVAILABLE:
             raise ImportError("FBLiR is not available.")
         params = model_params.get("FBLiR") or {}
-        adapt = int(params.get("adapt_steps", 100))
-        burnin = int(params.get("burnin_steps", 100))
+        adapt = int(params.get("adapt_steps", 200))
+        burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
-            thinning = max(1, int(params.get("thinning_steps", 1)))
-            n_chains = max(1, int(params.get("N_chains", 1)))
+            thinning = max(1, int(params.get("thinning_steps", 7)))
+            n_chains = max(1, int(params.get("N_chains", 2)))
             n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
             model = FuzzyBayesianRegression(
                 n_samples=n_samples,
@@ -2531,8 +2531,8 @@ if data_source == "Forecasting":
         help="Select one or more forecasting methods. Ensemble combines all selected methods. FBLiR provides uncertainty-aware predictions. LLM Forecaster uses OpenAI (see secrets / OPENAI_API_KEY)."
     )
     
-    forecast_horizon = st.sidebar.slider(
-        "Forecast Horizon (days)",
+    forecast_horizon = st.sidebar.number_input(
+        "Forecast Horizon (in days)",
         min_value=7,
         max_value=730,
         value=30,
@@ -2629,13 +2629,13 @@ if data_source == "Forecasting":
             
             # Bayesian Inference Parameters
             st.markdown("**Bayesian Inference Parameters:**")
-            fblir_n_chains = st.number_input("N_chains", min_value=1, max_value=10, value=1, step=1, key="fblir_n_chains",
+            fblir_n_chains = st.number_input("N_chains", min_value=1, max_value=10, value=2, step=1, key="fblir_n_chains",
                                             help="Number of MCMC chains for Bayesian inference")
-            fblir_adapt_steps = st.number_input("adapt_steps", min_value=10, max_value=1000, value=100, step=10, key="fblir_adapt_steps",
+            fblir_adapt_steps = st.number_input("adapt_steps", min_value=10, max_value=1000, value=200, step=10, key="fblir_adapt_steps",
                                                help="Number of adaptation steps for MCMC")
-            fblir_burnin_steps = st.number_input("burnin_steps", min_value=10, max_value=1000, value=100, step=10, key="fblir_burnin_steps",
+            fblir_burnin_steps = st.number_input("burnin_steps", min_value=10, max_value=1000, value=200, step=10, key="fblir_burnin_steps",
                                                  help="Number of burn-in steps for MCMC")
-            fblir_thinning_steps = st.number_input("thinning_steps", min_value=1, max_value=50, value=1, step=1, key="fblir_thinning_steps",
+            fblir_thinning_steps = st.number_input("thinning_steps", min_value=1, max_value=50, value=7, step=1, key="fblir_thinning_steps",
                                                    help="Thinning interval for MCMC samples")
             
             model_params['FBLiR'] = {
