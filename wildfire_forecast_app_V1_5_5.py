@@ -1045,6 +1045,23 @@ def prepare_ml_features(df, target_col, feature_cols, lag_days=7):
     
     return df_clean, feature_names
 
+
+def _apply_target_averaging(y_values, averaging_method, window_days):
+    """Optionally smooth target series before model fitting."""
+    y = np.asarray(y_values, dtype=float).ravel()
+    if averaging_method == "None (no averaging)":
+        return y, ""
+
+    w = int(max(2, window_days))
+    s = pd.Series(y)
+    if averaging_method == "Rolling mean":
+        y_smooth = s.rolling(window=w, min_periods=1).mean().values
+        return np.asarray(y_smooth, dtype=float), f"Target averaging: rolling mean ({w} days)."
+    if averaging_method == "Rolling median":
+        y_smooth = s.rolling(window=w, min_periods=1).median().values
+        return np.asarray(y_smooth, dtype=float), f"Target averaging: rolling median ({w} days)."
+    return y, ""
+
 def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3):
     """
     ✨ NEW FUNCTION: Get feature value for a future date based on historical seasonal patterns
@@ -2538,6 +2555,8 @@ if data_source == "Forecasting":
         value=30,
         step=1
     )
+    target_averaging_method = "None (no averaging)"
+    target_averaging_window = 7
     if forecast_horizon <= LONG_FORECAST_HORIZON_WARNING_DAYS:
         st.session_state.pop("long_forecast_horizon_dialog_dismissed", None)
     else:
@@ -2669,6 +2688,26 @@ if data_source == "Forecasting":
                 "model": (llm_model or "gpt-4o-mini").strip(),
                 "temperature": float(llm_temp),
             }
+
+        st.markdown("**Target Averaging (applies before all model fits)**")
+        target_averaging_method = st.selectbox(
+            "Target averaging (pre-fit)",
+            options=[
+                "None (no averaging)",
+                "Rolling mean",
+                "Rolling median",
+            ],
+            index=0,
+            help="Smooth the target series before model fitting to reduce day-to-day variance.",
+        )
+        if target_averaging_method != "None (no averaging)":
+            target_averaging_window = st.number_input(
+                "Averaging window (days)",
+                min_value=2,
+                max_value=60,
+                value=7,
+                step=1,
+            )
     
     selected_metric = forecast_target
     forecast_mode = True
@@ -3767,13 +3806,22 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 }).reset_index()
                                     
                                 daily_avg = daily_avg.dropna(subset=[forecast_target])
+                                daily_avg_model = daily_avg.copy()
+                                averaged_target_values, averaging_note = _apply_target_averaging(
+                                    daily_avg_model[forecast_target].astype(float).values,
+                                    target_averaging_method,
+                                    target_averaging_window,
+                                )
+                                daily_avg_model[forecast_target] = averaged_target_values
+                                if averaging_note:
+                                    st.caption(averaging_note)
                                     
                                 if len(daily_avg) < 30:
                                     st.error("⚠️ Insufficient historical data. Need at least 30 days.")
                                 else:
                                     # FIXED: Prepare features with better NaN handling
                                     df_ml, feature_names = prepare_ml_features(
-                                        daily_avg, 
+                                        daily_avg_model,
                                         forecast_target,
                                         selected_features,
                                         lag_days=7
@@ -3811,13 +3859,13 @@ if not st.session_state.show_selection_map and processed_bounds:
     
                                             try:
                                                 if method == "Prophet":
-                                                    df_prophet = daily_avg[['date', forecast_target]].copy()
+                                                    df_prophet = daily_avg_model[['date', forecast_target]].copy()
                                                     df_prophet.columns = ['ds', 'y']
                                                     predictions = train_prophet(df_prophet, forecast_horizon, model_params.get('Prophet'))
     
                                                 elif method == "LLM Forecaster":
                                                     predictions = train_llm_horizon_forecast(
-                                                        daily_avg,
+                                                        daily_avg_model,
                                                         forecast_target,
                                                         forecast_horizon,
                                                         future_dates,
@@ -3847,7 +3895,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                             fblir_status.success("✅ FBLiR completed.")
                                                             time.sleep(0.25)
                                                             fblir_status.empty()
-    
+
                                                 forecast_results[method] = predictions
     
                                             except Exception as e:
@@ -3872,7 +3920,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                             # Display forecast visualization in spatial_placeholder (col_map)
                                             with spatial_placeholder.container():
                                                 plain_summary = _simple_forecast_findings_summary(
-                                                    forecast_results, y, forecast_target, future_dates
+                                                    forecast_results, daily_avg[forecast_target].astype(float).values, forecast_target, future_dates
                                                 )
                                                 _ins = st.session_state.get("forecast_insights_md")
                                                 if _ins:
