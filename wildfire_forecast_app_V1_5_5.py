@@ -1866,8 +1866,10 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m = BayesianRidge(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=max(float(mp.get("lambda_1", 1e-6)), 1e-5),
-            lambda_2=max(float(mp.get("lambda_2", 1e-6)), 1e-5),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            max_iter=500,
+            tol=1e-4,
         )
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
@@ -2396,8 +2398,10 @@ def run_iterative_ml_forecast(
         model = BayesianRidge(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=max(float(mp.get("lambda_1", 1e-6)), 1e-5),
-            lambda_2=max(float(mp.get("lambda_2", 1e-6)), 1e-5),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            max_iter=500,
+            tol=1e-4,
         )
         model.fit(X_scaled, y)
 
@@ -2497,8 +2501,9 @@ def run_iterative_ml_forecast(
         if method in ("Linear Regression", "Bayesian Linear Regression"):
             tail_z = current_data[forecast_target].tail(21)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            # Pull each step toward recent local level to tame recursive drift (esp. under log1p + expm1).
-            pred = (1.0 - 0.14) * pred + 0.14 * anchor
+            # Anchor blend tames recursive drift; BayesianRidge gets a lighter blend (it already shrinks coefficients).
+            mix = 0.14 if method == "Linear Regression" else 0.07
+            pred = (1.0 - mix) * pred + mix * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         predictions.append(pred)
 
@@ -4059,14 +4064,6 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 else:
                                     st.info("Residual diagnostics unavailable for the selected models.")
 
-                                st.caption(
-                                    "**AIC (train) / BIC (train):** in-sample training fit only, on the **model fitting scale** "
-                                    "(e.g. log(1+y) if log transform is on). They do **not** score multi-step forecast "
-                                    "accuracy. A rough complexity penalty is applied; tree methods use a **capped** "
-                                    "effective-parameter proxy so the table is less skewed than when using tree counts "
-                                    "literally. **Do not read “more negative = better forecast”** from this row—use the "
-                                    "forecast plot and out-of-sample judgment for that."
-                                )
                                 summary_rows_fc = []
                                 if len(y_hist):
                                     summary_rows_fc.append({
