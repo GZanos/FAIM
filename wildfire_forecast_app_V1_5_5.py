@@ -409,6 +409,8 @@ AVAILABLE_PARAMETERS = {
     "TS": "Earth Skin Temperature (°C)"
 }
 
+DATA_SOURCE_QUICK_HISTORICAL = "Quick Historical Data"
+
 @st.cache_data(ttl=3600)
 def fetch_nasa_power_data(lat, lon, start_date, end_date, parameters):
     """Fetch data from NASA POWER API"""
@@ -554,59 +556,6 @@ def get_afdr_category(afdr_value):
     else:
         return "Extreme", "⚫"
 
-def create_sample_data_for_period(start_date, end_date):
-    """Create sample data for a specific date period"""
-    lats = np.linspace(40.5, 42.0, 15)
-    lons = np.linspace(-78.5, -76.5, 15)
-    dates = pd.date_range(start_date, end_date, freq="D")
-    
-    records = []
-    rng = np.random.default_rng(42)
-    
-    for date in dates:
-        for lat in lats:
-            for lon in lons:
-                day_of_year = date.dayofyear
-                base_temp = 20 + 15 * np.sin(2 * np.pi * day_of_year / 365)
-                temp_noise = rng.normal(0, 5)
-                
-                record = {
-                    "lat": lat,
-                    "lon": lon,
-                    "date": date,
-                    "T2M": base_temp + temp_noise,
-                    "T2M_MAX": base_temp + temp_noise + rng.uniform(5, 15),
-                    "T2M_MIN": base_temp + temp_noise - rng.uniform(5, 10),
-                    "T2M_RANGE": rng.uniform(10, 25),
-                    "RH2M": rng.uniform(30, 80),
-                    "T2MDEW": base_temp + temp_noise - rng.uniform(5, 15),
-                    "T2MWET": base_temp + temp_noise - rng.uniform(2, 8),
-                    "PRECTOT": rng.exponential(2),
-                    "WS10M": rng.gamma(2, 2),
-                    "WD10M": rng.uniform(0, 360),
-                    "TS": base_temp + temp_noise + rng.normal(0, 2)
-                }
-                
-                record["FWI"] = calculate_robust_fwi(
-                    record["T2M"], 
-                    record["RH2M"], 
-                    record["WS10M"], 
-                    record["PRECTOT"]
-                )
-                
-                record["AFDR"] = calculate_afdr(
-                    record["T2M"],
-                    record["RH2M"],
-                    record["WS10M"],
-                    record["PRECTOT"]
-                )
-                
-                records.append(record)
-    
-    df = pd.DataFrame(records)
-    return gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
-
-
 @st.cache_resource
 def load_global_land_geometry():
     """Load world land polygons once for AOI land/ocean validation."""
@@ -688,60 +637,72 @@ def filter_points_to_land(gdf, land_geom_aoi):
     except Exception:
         return gdf
 
-def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r', opacity=0.4, metric_name="Value", full_map_bounds=None):
+def create_continuous_heatmap(
+    bounds,
+    values_grid,
+    gradient_colormap='RdYlBu_r',
+    opacity=0.4,
+    metric_name="Value",
+    full_map_bounds=None,
+    color_scheme="blue",
+):
     """
-    Create a smooth continuous heatmap overlay using HeatMap plugin with blue gradient
-    - Smooth flowing patterns instead of rectangles
-    - Blue-only gradient for professional appearance
-    - Map features remain visible underneath
+    Folium HeatMap overlay with blue or red gradient (normalized by AOI min/max).
     Returns: (heatmap_layer, legend_html)
     """
     minx, miny, maxx, maxy = bounds
     grid_height, grid_width = values_grid.shape
-    
-    # Get value range for normalization and legend
+
+    blue_gradient = {
+        0.0: '#E3F2FD',
+        0.2: '#90CAF9',
+        0.4: '#42A5F5',
+        0.6: '#1E88E5',
+        0.8: '#1565C0',
+        1.0: '#0D47A1',
+    }
+    blue_css = "#E3F2FD,#90CAF9,#42A5F5,#1E88E5,#1565C0,#0D47A1"
+    red_gradient = {
+        0.0: '#FFF8F8',
+        0.2: '#FFCDD2',
+        0.4: '#E57373',
+        0.6: '#E53935',
+        0.8: '#C62828',
+        1.0: '#7F0000',
+    }
+    red_css = "#FFF8F8,#FFCDD2,#E57373,#E53935,#C62828,#7F0000"
+    scheme = str(color_scheme).lower().strip()
+    gradient_map = red_gradient if scheme == "red" else blue_gradient
+    legend_css = red_css if scheme == "red" else blue_css
+
     vmin = np.nanmin(values_grid)
     vmax = np.nanmax(values_grid)
     vrange = vmax - vmin
-    
-    # Convert grid to HeatMap format: [[lat, lon, normalized_intensity], ...]
+
     heatmap_data = []
     for i in range(grid_height):
         for j in range(grid_width):
             value = values_grid[i, j]
             if not np.isnan(value):
-                # Calculate position
                 lat = miny + (i / grid_height) * (maxy - miny)
                 lon = minx + (j / grid_width) * (maxx - minx)
-                
-                # Normalize intensity to 0-1 range
                 if vmax > vmin:
                     normalized_intensity = (value - vmin) / (vmax - vmin)
                 else:
                     normalized_intensity = 0.5
-                
                 heatmap_data.append([lat, lon, normalized_intensity])
-    
-    # Create feature group for the heatmap
+
     heatmap_layer = folium.FeatureGroup(name='Heatmap')
-    
-    # Add smooth HeatMap with blue gradient
+
     HeatMap(
         heatmap_data,
-        min_opacity=0.3,      # Transparent enough to see map
-        max_opacity=0.7,      # Strong enough to show patterns
-        radius=25,            # Larger radius for smooth blending
-        blur=20,              # High blur for continuous appearance
-        gradient={
-            0.0: '#E3F2FD',   # Very light blue (low values)
-            0.2: '#90CAF9',   # Light blue
-            0.4: '#42A5F5',   # Medium-light blue
-            0.6: '#1E88E5',   # Medium blue
-            0.8: '#1565C0',   # Dark blue
-            1.0: '#0D47A1'    # Very dark blue (high values)
-        }
+        min_opacity=0.3,
+        max_opacity=0.7,
+        radius=25,
+        blur=20,
+        gradient=gradient_map,
     ).add_to(heatmap_layer)
-    
+
     safe_title = html_module.escape(str(metric_name))
     mean_g = float(np.nanmean(values_grid))
     std_g = float(np.nanstd(values_grid))
@@ -749,7 +710,7 @@ def create_continuous_heatmap(bounds, values_grid, gradient_colormap='RdYlBu_r',
         f'<p style="margin:0 0 8px 0;font-weight:bold;text-align:center;color:#000;font-size:14px;line-height:1.2;">{safe_title}</p>'
         '<div style="margin-bottom:6px;">'
         '<div style="width:100%;height:18px;background:linear-gradient(to right,'
-        '#E3F2FD,#90CAF9,#42A5F5,#1E88E5,#1565C0,#0D47A1);border:2px solid #333;border-radius:3px;"></div>'
+        f'{legend_css});border:2px solid #333;border-radius:3px;"></div>'
         '</div>'
         '<div style="display:flex;justify-content:space-between;font-size:12px;margin-top:4px;color:#000;font-weight:600;">'
         f'<span><b>Min:</b> {vmin:.1f}</span><span><b>Max:</b> {vmax:.1f}</span>'
@@ -1068,6 +1029,27 @@ def _apply_target_smoothing(y_values, smoothing_method, window_days, dates=None)
         y_smooth = s.ewm(span=w, adjust=False, min_periods=1).mean().values
         return np.asarray(y_smooth, dtype=float), f"Target smoothing: EMA (span={w} days)."
     return y, ""
+
+
+def _forward_target_model_scale(smoothed_y: np.ndarray, use_log: bool):
+    """Apply optional ln(1+y) on nonnegative smoothed target for model fitting."""
+    y = np.asarray(smoothed_y, dtype=float).copy()
+    y[~np.isfinite(y)] = np.nan
+    if use_log:
+        y = np.where(np.isfinite(y), np.maximum(y, 0.0), np.nan)
+        y = np.nan_to_num(y, nan=0.0)
+        return np.log1p(y), (
+            "Target uses ln(1+y) before fitting; forecast traces use original scale."
+        )
+    return y, None
+
+
+def _inverse_target_transform_predictions(predictions, use_log: bool) -> np.ndarray:
+    """Map model-scale forecasts back to original units for plotting and export."""
+    p = np.asarray(predictions, dtype=float)
+    if not use_log:
+        return p
+    return np.expm1(p)
 
 
 def _apply_stl_target_smoothing(y, dates):
@@ -2089,14 +2071,14 @@ def _plotly_to_png_bytes(fig):
         return None
 
 
-def _spatial_grid_plotly(values_grid, bounds, title):
+def _spatial_grid_plotly(values_grid, bounds, title, colorscale="Blues"):
     """Static spatial heatmap figure for PDF export."""
     try:
         minx, miny, maxx, maxy = bounds
         fig = go.Figure(
             data=go.Heatmap(
                 z=np.asarray(values_grid, dtype=float),
-                colorscale="Blues",
+                colorscale=colorscale,
                 colorbar=dict(title="Intensity"),
             )
         )
@@ -2490,14 +2472,6 @@ def run_iterative_ml_forecast(
 
 
 # Initialize session state
-if 'gdf_data' not in st.session_state:
-    st.session_state.gdf_data = None
-if 'animation_running' not in st.session_state:
-    st.session_state.animation_running = False
-if 'current_frame' not in st.session_state:
-    st.session_state.current_frame = 0
-if 'forecast_frames' not in st.session_state:
-    st.session_state.forecast_frames = None
 if 'map_type' not in st.session_state:
     st.session_state.map_type = "Street"
 if 'forecast_insights_md' not in st.session_state:
@@ -2511,33 +2485,36 @@ st.sidebar.header("⚙️ Controls")
 # Data source selection
 data_source = st.sidebar.radio(
     "Data Source",
-    ["Last 30 Days (Quick)", "NASA POWER API (Full)", "Forecasting"]
+    [DATA_SOURCE_QUICK_HISTORICAL, "Forecasting"],
 )
 if data_source != "Forecasting":
     st.session_state.forecast_insights_md = None
 
 # Date range selection
-if data_source == "Last 30 Days (Quick)":
-    start_date = datetime.now() - timedelta(days=33)
-    end_date = datetime.now() - timedelta(days=3)
-    st.sidebar.info("📅 Date Range: Last 30 days")
-    st.sidebar.text(f"From: {start_date.strftime('%Y-%m-%d')}")
-    st.sidebar.text(f"To: {end_date.strftime('%Y-%m-%d')}")
-    
-elif data_source == "NASA POWER API (Full)":
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
-        start_date = st.date_input(
-            "Start Date",
-            value=datetime(2024, 1, 1),
-            max_value=datetime.now() - timedelta(days=3)
-        )
-    with col2:
-        end_date = st.date_input(
-            "End Date", 
-            value=datetime(2024, 1, 30),
-            max_value=datetime.now() - timedelta(days=3)
-        )
+if data_source == DATA_SOURCE_QUICK_HISTORICAL:
+    select_last_30_hist = st.sidebar.checkbox(
+        "Select last 30 days",
+        value=False,
+        help="Sets the historical window to the most recent 30 available days (end date lagged ~3 days like NASA latency handling).",
+    )
+    if select_last_30_hist:
+        end_date = (datetime.now() - timedelta(days=3)).date()
+        start_date = end_date - timedelta(days=29)
+        st.sidebar.caption(f"📅 Date range: **{start_date}** → **{end_date}**")
+    else:
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            start_date = st.date_input(
+                "Start Date",
+                value=datetime(2024, 1, 1),
+                max_value=datetime.now() - timedelta(days=3),
+            )
+        with col2:
+            end_date = st.date_input(
+                "End Date",
+                value=datetime(2024, 1, 30),
+                max_value=datetime.now() - timedelta(days=3),
+            )
 else:  # Forecasting mode
     col1, col2 = st.sidebar.columns(2)
     with col1:
@@ -2548,7 +2525,7 @@ else:  # Forecasting mode
         )
     with col2:
         end_date = st.date_input(
-            "Historical End", 
+            "Historical End",
             value=datetime.now() - timedelta(days=3),
             max_value=datetime.now() - timedelta(days=3)
         )
@@ -2612,8 +2589,6 @@ if data_source == "Forecasting":
         value=30,
         step=1
     )
-    target_smoothing_method = "None (no smoothing)"
-    target_smoothing_window = 7
     if forecast_horizon <= LONG_FORECAST_HORIZON_WARNING_DAYS:
         st.session_state.pop("long_forecast_horizon_dialog_dismissed", None)
     else:
@@ -2623,6 +2598,48 @@ if data_source == "Forecasting":
         )
         if not st.session_state.get("long_forecast_horizon_dialog_dismissed"):
             _long_forecast_horizon_dialog(forecast_horizon, LONG_FORECAST_HORIZON_WARNING_DAYS)
+
+    with st.sidebar.expander("📐 Original Series Settings", expanded=False):
+        log_transform_target = st.checkbox(
+            "Log-transform target (ln(1+y), pre-fit)",
+            value=False,
+            help=(
+                "Fit models on ln(1+y) after optional smoothing; residual diagnostics use this scale. "
+                "Forecast time series and CSV exports use the original scale."
+            ),
+        )
+        target_smoothing_method = st.selectbox(
+            "Target smoothing (pre-fit)",
+            options=[
+                "None (no smoothing)",
+                "Rolling mean",
+                "Rolling median",
+                "Exponential moving average (EMA)",
+                "Seasonal smoothing (STL)",
+            ],
+            index=0,
+            help=(
+                "Smooth the target before fitting. EMA reacts faster to shifts than rolling windows. "
+                "STL fits annual seasonality on long daily series (~2+ years recommended)."
+            ),
+            key="target_smooth_method_outer",
+        )
+        target_smoothing_window = 7
+        if target_smoothing_method == "Seasonal smoothing (STL)":
+            st.caption(
+                "STL uses period=365 days. Needs at least ~730 consecutive calendar days in range "
+                "(gaps are linearly interpolated)."
+            )
+        elif target_smoothing_method != "None (no smoothing)":
+            target_smoothing_window = st.number_input(
+                "Smoothing window (days)",
+                min_value=2,
+                max_value=60,
+                value=7,
+                step=1,
+                help="Rolling window for mean/median; EMA span (typical effective memory ~this many days).",
+                key="target_smooth_window_outer",
+            )
 
     # MODEL PARAMETERS SECTION
     st.sidebar.subheader("🎛️ Model Parameters")
@@ -2746,37 +2763,6 @@ if data_source == "Forecasting":
                 "temperature": float(llm_temp),
             }
 
-        st.markdown("**Target smoothing (applies before all model fits)**")
-        target_smoothing_method = st.selectbox(
-            "Target smoothing (pre-fit)",
-            options=[
-                "None (no smoothing)",
-                "Rolling mean",
-                "Rolling median",
-                "Exponential moving average (EMA)",
-                "Seasonal smoothing (STL)",
-            ],
-            index=0,
-            help=(
-                "Smooth the target before fitting. EMA reacts faster to shifts than rolling windows. "
-                "STL fits annual seasonality on long daily series (~2+ years recommended)."
-            ),
-        )
-        if target_smoothing_method == "Seasonal smoothing (STL)":
-            st.caption(
-                "STL uses period=365 days. Needs at least ~730 consecutive calendar days in range "
-                "(gaps are linearly interpolated)."
-            )
-        elif target_smoothing_method != "None (no smoothing)":
-            target_smoothing_window = st.number_input(
-                "Smoothing window (days)",
-                min_value=2,
-                max_value=60,
-                value=7,
-                step=1,
-                help="Rolling window for mean/median; EMA span (typical effective memory ~this many days).",
-            )
-    
     selected_metric = forecast_target
     forecast_mode = True
 else:
@@ -2788,16 +2774,6 @@ else:
     )
     forecast_mode = False
     model_params = {}
-
-# Animation controls (only for forecasting)
-if data_source == "Forecasting":
-    animation_speed = st.sidebar.slider(
-        "Animation Speed (seconds)",
-        min_value=0.3,
-        max_value=2.0,
-        value=0.5,
-        step=0.1
-    )
 
 # Map controls in sidebar
 st.sidebar.subheader("🗺️ Map Controls")
@@ -2856,8 +2832,9 @@ Ask me anything about the app!"""
 3. Select features to use for training
 4. Choose forecast methods (Random Forest, XGBoost, FBLiR, etc.)
 5. Set forecast horizon (7-730 days)
-6. Configure model parameters if needed
-7. Draw an area on the map and click "Generate Forecast"
+6. Use **Original Series Settings** for optional smoothing / log transform (fits use this; plots export original scale)
+7. Configure model parameters if needed
+8. Draw an AOI on the map — forecasting runs when viewing Spatial Distribution with Time Series
 
 **Forecast Methods:**
 - **Random Forest**: Fast, good for most cases
@@ -2866,7 +2843,9 @@ Ask me anything about the app!"""
 - **Prophet**: Time series forecasting
 - **Ensemble**: Combines all selected methods
 
-**Note:** Forecasting takes 20-40 seconds (FBLiR: 6-10 minutes)"""
+**Note:** Forecasting takes 20-40 seconds (FBLiR: 6-10 minutes)
+
+**Scale:** Original-series preprocessing applies **before fitting**; forecast time series use **original units**."""
         },
         
         # FBLiR questions
@@ -2910,7 +2889,7 @@ FBLiR combines Gaussian Fuzzy Numbers (GFN) and Bayesian inference for uncertain
             'patterns': ['parameter', 'model parameter', 'configure', 'settings', 'tune', 'hyperparameter'],
             'response': """⚙️ **Model Parameters Guide:**
 
-**Access:** Sidebar → "⚙️ Configure Model Parameters" expander
+**Access:** Sidebar → **📐 Original Series Settings** (smoothing / log) and **⚙️ Configure Model Parameters**
 
 **Available Models:**
 1. **Random Forest:**
@@ -2961,8 +2940,8 @@ FBLiR combines Gaussian Fuzzy Numbers (GFN) and Bayesian inference for uncertain
             'response': """📡 **Data Sources:**
 
 **Available Sources:**
-1. **Last 30 Days (Quick):** Sample data for quick testing
-2. **NASA POWER API:** Real meteorological data
+1. **Quick Historical Data:** NASA POWER records over your chosen history window (optional **last 30 days** shortcut)
+2. **Forecasting:** Same retrieval plus forecasting, diagnostics, and exports
 
 **NASA POWER Parameters:**
 - Temperature (T2M, T2M_MAX, T2M_MIN, T2M_RANGE)
@@ -3017,7 +2996,6 @@ The app automatically creates:
 3. **No data showing:**
    - Check date range
    - Verify area selection on map
-   - Try "Last 30 Days (Quick)" for testing
 
 4. **Map not loading:**
    - Check internet connection
@@ -3170,14 +3148,6 @@ def _reset_faim_app() -> None:
 
 if st.sidebar.button("🔄 Reset App", use_container_width=True, key="reset_faim_app"):
     _reset_faim_app()
-
-# Load or create data
-@st.cache_data
-def load_data(source, start_dt, end_dt):
-    if source == "Last 30 Days (Quick)":
-        return create_sample_data_for_period(start_dt, end_dt)
-    else:
-        return None
 
 # Main content — full width (maps first, then visualizations below)
 main_viz = st.container()
@@ -3379,98 +3349,93 @@ if not st.session_state.show_selection_map and processed_bounds:
         spatial_placeholder = st.empty()
             
         # Load/fetch data based on source
-        if data_source == "Last 30 Days (Quick)":
-            if st.session_state.gdf_data is None:
-                with st.spinner("Loading last 30 days data..."):
-                    st.session_state.gdf_data = load_data(data_source, start_date, end_date)
-                
-            gdf = st.session_state.gdf_data
-            mask = (gdf['date'] >= pd.to_datetime(start_date)) & (gdf['date'] <= pd.to_datetime(end_date))
-            gdf_filtered = gdf[mask].copy()
-                
-        elif data_source == "NASA POWER API (Full)":
-                with st.spinner("🛰️ Fetching NASA POWER data..."):
-                    try:
-                        minx, miny, maxx, maxy = bounds
-                        lat_range = maxy - miny
-                        lon_range = maxx - minx
-                        area_size = lat_range * lon_range
-                            
-                        if area_size < 0.25:
-                            grid_points = 5
-                            st.info("Small area - using high resolution (5x5 grid)")
-                        elif area_size < 1.0:
-                            grid_points = 4
-                            st.info("Medium area - using medium resolution (4x4 grid)")
-                        else:
-                            grid_points = 3
-                            st.info("Large area - using lower resolution (3x3 grid)")
-                            
-                        lats = np.linspace(miny, maxy, grid_points)
-                        lons = np.linspace(minx, maxx, grid_points)
-                            
-                        all_data = []
-                        total_points = len(lats) * len(lons)
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-                            
-                        for i, lat in enumerate(lats):
-                            for j, lon in enumerate(lons):
-                                current_point = i * len(lons) + j + 1
-                                progress_bar.progress(current_point / total_points)
-                                status_text.text(f"Fetching data for point {current_point}/{total_points} ({lat:.3f}°, {lon:.3f}°)")
-                                    
-                                point_data = fetch_nasa_power_data(
-                                    lat, lon, start_date, end_date, 
-                                    list(AVAILABLE_PARAMETERS.keys())
-                                )
-                                    
-                                if not point_data.empty:
-                                    for idx, row in point_data.iterrows():
-                                        fwi = calculate_robust_fwi(
-                                            row.get('T2M'), 
-                                            row.get('RH2M'), 
-                                            row.get('WS10M'), 
-                                            row.get('PRECTOT')
-                                        )
-                                        point_data.at[idx, 'FWI'] = fwi
-                                            
-                                        afdr = calculate_afdr(
-                                            row.get('T2M'),
-                                            row.get('RH2M'),
-                                            row.get('WS10M'),
-                                            row.get('PRECTOT')
-                                        )
-                                        point_data.at[idx, 'AFDR'] = afdr
-                                        
-                                    all_data.append(point_data)
-                                    
-                                time.sleep(0.2)
-                            
-                        progress_bar.empty()
-                        status_text.empty()
-                            
-                        if all_data:
-                            combined_df = pd.concat(all_data, ignore_index=True)
-                            gdf_filtered = gpd.GeoDataFrame(
-                                combined_df, 
-                                geometry=gpd.points_from_xy(combined_df.lon, combined_df.lat), 
-                                crs="EPSG:4326"
+        if data_source == DATA_SOURCE_QUICK_HISTORICAL:
+            with st.spinner("🛰️ Fetching NASA POWER data..."):
+                try:
+                    minx, miny, maxx, maxy = bounds
+                    lat_range = maxy - miny
+                    lon_range = maxx - minx
+                    area_size = lat_range * lon_range
+
+                    if area_size < 0.25:
+                        grid_points = 5
+                        st.info("Small area - using high resolution (5x5 grid)")
+                    elif area_size < 1.0:
+                        grid_points = 4
+                        st.info("Medium area - using medium resolution (4x4 grid)")
+                    else:
+                        grid_points = 3
+                        st.info("Large area - using lower resolution (3x3 grid)")
+
+                    lats = np.linspace(miny, maxy, grid_points)
+                    lons = np.linspace(minx, maxx, grid_points)
+
+                    all_data = []
+                    total_points = len(lats) * len(lons)
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+
+                    for i, lat in enumerate(lats):
+                        for j, lon in enumerate(lons):
+                            current_point = i * len(lons) + j + 1
+                            progress_bar.progress(current_point / total_points)
+                            status_text.text(
+                                f"Fetching data for point {current_point}/{total_points} ({lat:.3f}°, {lon:.3f}°)"
                             )
-                                
-                            st.success(f"✅ Successfully fetched NASA POWER data for {len(gdf_filtered)} data points!")
-                                
-                            valid_data_count = gdf_filtered[selected_metric].notna().sum()
-                            st.info(f"📊 Data quality: {valid_data_count}/{len(gdf_filtered)} records have valid {selected_metric} data")
-                        else:
-                            st.error("❌ Failed to fetch NASA POWER data. Please try again or use sample data.")
-                            gdf_filtered = None
-                                
-                    except Exception as e:
-                        st.error(f"❌ Error fetching NASA POWER data: {str(e)}")
-                        st.info("💡 Please try using Sample Data instead, or check your internet connection.")
+
+                            point_data = fetch_nasa_power_data(
+                                lat, lon, start_date, end_date,
+                                list(AVAILABLE_PARAMETERS.keys())
+                            )
+
+                            if not point_data.empty:
+                                for idx, row in point_data.iterrows():
+                                    fwi = calculate_robust_fwi(
+                                        row.get('T2M'),
+                                        row.get('RH2M'),
+                                        row.get('WS10M'),
+                                        row.get('PRECTOT')
+                                    )
+                                    point_data.at[idx, 'FWI'] = fwi
+
+                                    afdr = calculate_afdr(
+                                        row.get('T2M'),
+                                        row.get('RH2M'),
+                                        row.get('WS10M'),
+                                        row.get('PRECTOT')
+                                    )
+                                    point_data.at[idx, 'AFDR'] = afdr
+
+                                all_data.append(point_data)
+
+                            time.sleep(0.2)
+
+                    progress_bar.empty()
+                    status_text.empty()
+
+                    if all_data:
+                        combined_df = pd.concat(all_data, ignore_index=True)
+                        gdf_filtered = gpd.GeoDataFrame(
+                            combined_df,
+                            geometry=gpd.points_from_xy(combined_df.lon, combined_df.lat),
+                            crs="EPSG:4326"
+                        )
+
+                        st.success(f"✅ Successfully fetched NASA POWER data for {len(gdf_filtered)} data points!")
+
+                        valid_data_count = gdf_filtered[selected_metric].notna().sum()
+                        st.info(
+                            f"📊 Data quality: {valid_data_count}/{len(gdf_filtered)} records have valid {selected_metric} data"
+                        )
+                    else:
+                        st.error("❌ Failed to fetch NASA POWER data. Please try again.")
                         gdf_filtered = None
-            
+
+                except Exception as e:
+                    st.error(f"❌ Error fetching NASA POWER data: {str(e)}")
+                    st.info("💡 Check your internet connection and date range, then retry.")
+                    gdf_filtered = None
+
         else:  # Forecasting mode
                 with st.spinner("🛰️ Fetching NASA POWER data for forecasting..."):
                     try:
@@ -3546,982 +3511,529 @@ if not st.session_state.show_selection_map and processed_bounds:
                     except Exception as e:
                         st.error(f"❌ Error: {str(e)}")
                         gdf_filtered = None
-            
+
         if gdf_filtered is not None and not gdf_filtered.empty:
-                    st.subheader("📊 Visualization")
-                        
-                    if forecast_mode:
-                        viz_mode = st.radio(
-                            "Mode",
-                            ["Time Series", "Forecast Animation"]
-                        )
+            st.subheader("📊 Visualization")
+
+            mask = (
+                (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
+                (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
+            )
+            gdf_aoi = gdf_filtered[mask]
+            gdf_aoi = filter_points_to_land(gdf_aoi, land_mask_geom_for_aoi)
+
+            if not gdf_aoi.empty:
+                if forecast_mode and selected_features:
+                    st.info("🔮 Generating forecast... This may take a moment.")
+                                    
+                    # Prepare data for forecasting
+                    daily_avg = gdf_aoi.groupby('date').agg({
+                        forecast_target: 'mean',
+                        **{feat: 'mean' for feat in selected_features if feat in gdf_aoi.columns}
+                    }).reset_index()
+                                    
+                    daily_avg = daily_avg.dropna(subset=[forecast_target])
+                    daily_avg_model = daily_avg.copy()
+                    smoothed_target_values, smoothing_note = _apply_target_smoothing(
+                        daily_avg_model[forecast_target].astype(float).values,
+                        target_smoothing_method,
+                        target_smoothing_window,
+                        dates=daily_avg_model["date"].values,
+                    )
+                    daily_avg_model[forecast_target] = smoothed_target_values
+                    if smoothing_note:
+                        st.caption(smoothing_note)
+                    model_target_vals, log_note = _forward_target_model_scale(
+                        daily_avg_model[forecast_target].astype(float).values,
+                        log_transform_target,
+                    )
+                    daily_avg_model[forecast_target] = model_target_vals
+                    if log_note:
+                        st.caption(log_note)
+
+                    if len(daily_avg) < 30:
+                        st.error("⚠️ Insufficient historical data. Need at least 30 days.")
                     else:
-                        viz_mode = st.radio(
-                            "Mode",
-                            ["Single Date", "Animation", "Time Series"]
+                        # FIXED: Prepare features with better NaN handling
+                        df_ml, feature_names = prepare_ml_features(
+                            daily_avg_model,
+                            forecast_target,
+                            selected_features,
+                            lag_days=7
                         )
-                        
-                    if viz_mode == "Single Date":
-                        available_dates = sorted(gdf_filtered['date'].unique())
-                        selected_date = st.selectbox(
-                            "Select Date",
-                            options=available_dates,
-                            format_func=lambda x: x.strftime("%Y-%m-%d")
-                        )
-                            
-                        gdf_date = gdf_filtered[gdf_filtered['date'] == selected_date]
-                            
-                        if not gdf_date.empty:
-                            # FIXED: Use continuous heatmap with rectangles
-                            ref_sd = float(gdf_date[selected_metric].dropna().astype(float).std())
-                            if not np.isfinite(ref_sd):
-                                ref_sd = 0.0
-                            values_grid, values = create_heatmap_data(
-                                gdf_date, bounds, selected_metric, reference_std=ref_sd, land_geom_aoi=land_mask_geom_for_aoi
+                                        
+                        if len(df_ml) < 20:
+                            st.error(f"⚠️ Not enough data after feature engineering. Got {len(df_ml)} rows, need at least 20.")
+                            st.info("💡 Try: (1) Using fewer features, (2) Longer historical period, or (3) Different forecast target")
+                        else:
+                            X = df_ml[feature_names]
+                            y = df_ml[forecast_target]
+                                            
+                            scaler = StandardScaler()
+                            X_scaled = pd.DataFrame(
+                                scaler.fit_transform(X),
+                                columns=X.columns,
+                                index=X.index
                             )
-                                
-                            if values_grid is not None and values:
-                                vmin, vmax = min(values), max(values)
-                                metric_description = AVAILABLE_PARAMETERS.get(
-                                    selected_metric,
-                                    "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating"
-                                )
-                                with spatial_placeholder.container():
-                                    s1, s2 = st.columns(2, gap="large")
-                                    with s1:
-                                        st.subheader("Spatial — selected date")
-                                        if map_type == "Detailed":
-                                            m_single = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level
-                                            )
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Esri Satellite'
-                                            ).add_to(m_single)
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Labels',
-                                                overlay=True
-                                            ).add_to(m_single)
-                                        elif map_type == "Terrain":
-                                            m_single = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="OpenStreetMap"
-                                            )
-                                        else:
-                                            m_single = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="CartoDB positron"
-                                            )
-                                        folium.Rectangle(
-                                            bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                            color="red",
-                                            weight=2,
-                                            fill_opacity=0.0,
-                                            popup=f"Selected date: {selected_date.strftime('%Y-%m-%d')}"
-                                        ).add_to(m_single)
-                                        metric_map = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
-                                        heatmap_layer, legend_html = create_continuous_heatmap(
-                                            bounds, values_grid,
-                                            opacity=heatmap_opacity,
-                                            metric_name=metric_map
+                                            
+                            # Generate future dates
+                            last_date = daily_avg['date'].max()
+                            future_dates = pd.date_range(
+                                start=last_date + timedelta(days=1),
+                                periods=forecast_horizon,
+                                freq='D'
+                            )
+                                            
+                            # Create future features iteratively
+                            st.session_state.forecast_insights_md = None
+                            forecast_results = {}
+    
+                            for method in forecast_methods:
+                                if method == "Ensemble":
+                                    continue
+    
+                                try:
+                                    if method == "Prophet":
+                                        df_prophet = daily_avg_model[['date', forecast_target]].copy()
+                                        df_prophet.columns = ['ds', 'y']
+                                        predictions = train_prophet(df_prophet, forecast_horizon, model_params.get('Prophet'))
+    
+                                    elif method == "LLM Forecaster":
+                                        predictions = train_llm_horizon_forecast(
+                                            daily_avg_model,
+                                            forecast_target,
+                                            forecast_horizon,
+                                            future_dates,
+                                            model_params.get("LLM Forecaster"),
                                         )
-                                        heatmap_layer.add_to(m_single)
-                                        m_single.get_root().html.add_child(folium.Element(legend_html))
-                                        st_folium(
-                                            m_single,
-                                            key=f"single_date_map_{selected_date}",
-                                            width=VIZ_FOLIUM_CELL_W,
-                                            height=VIZ_FOLIUM_CELL_H,
-                                            returned_objects=[],
-                                        )
-                                    with s2:
-                                        st.subheader("Distribution")
-                                        dist_fig = create_distribution_plot(values, selected_metric, metric_description)
-                                        if dist_fig:
-                                            dist_fig.update_layout(height=480, margin=dict(t=50, b=40))
-                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
-                                    summary_sd = [{
-                                        "Date": selected_date.strftime("%Y-%m-%d"),
-                                        "Metric": selected_metric,
-                                        "Min": float(vmin),
-                                        "Mean": float(np.mean(values)),
-                                        "Max": float(vmax),
-                                        "Std": float(np.std(values)),
-                                        "Median": float(np.median(values)),
-                                        "P25": float(np.percentile(values, 25)),
-                                        "P75": float(np.percentile(values, 75)),
-                                    }]
-                                    if selected_metric == "AFDR":
-                                        avg_afdr = float(np.mean(values))
-                                        category, emoji = get_afdr_category(avg_afdr)
-                                        st.info(f"{emoji} **AFDR category:** {category}")
-                                    st.subheader("Summary statistics")
-                                    st.dataframe(
-                                        pd.DataFrame(summary_sd).round(3),
-                                        use_container_width=True,
-                                        hide_index=True,
-                                    )
-                        
-                    elif viz_mode == "Animation":
-                        available_dates = sorted(gdf_filtered['date'].unique())
-                        anim_ref_std = float(gdf_filtered[selected_metric].dropna().astype(float).std())
-                        if not np.isfinite(anim_ref_std):
-                            anim_ref_std = 0.0
-                            
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.button("▶️ Start Animation", key="start_historical_anim"):
-                                st.session_state.animation_running = True
-                                st.session_state.current_frame = 0
-                                st.rerun()
-                            
-                        with col2:
-                            if st.button("⏸️ Stop Animation", key="stop_historical_anim"):
-                                st.session_state.animation_running = False
-                                st.rerun()
-                            
-                        # Initialize animation state
-                        if 'current_frame' not in st.session_state:
-                            st.session_state.current_frame = 0
-                            
-                        # Animation loop
-                        if st.session_state.animation_running and available_dates:
-                            # Get current date
-                            current_date = available_dates[st.session_state.current_frame]
-                                
-                            # Progress indicator
-                            progress = (st.session_state.current_frame + 1) / len(available_dates)
-                            st.progress(progress)
-                            st.write(f"**Showing:** {current_date.strftime('%Y-%m-%d')} (Frame {st.session_state.current_frame + 1}/{len(available_dates)})")
-                                
-                            # Filter data for current date
-                            gdf_date = gdf_filtered[gdf_filtered['date'] == current_date]
-                                
-                            if not gdf_date.empty:
-                                values_grid, values = create_heatmap_data(
-                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std, land_geom_aoi=land_mask_geom_for_aoi
-                                )
-                                    
-                                if values_grid is not None and values:
-                                    # Create animation map with spatial heatmap
-                                    with spatial_placeholder.container():
-                                        if map_type == "Detailed":
-                                            m_anim = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level
-                                            )
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Esri Satellite'
-                                            ).add_to(m_anim)
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Labels',
-                                                overlay=True
-                                            ).add_to(m_anim)
-                                        elif map_type == "Terrain":
-                                            m_anim = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="OpenStreetMap"
-                                            )
-                                        else:
-                                            m_anim = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="CartoDB positron"
-                                            )
-                                            
-                                        # Add AOI rectangle
-                                        folium.Rectangle(
-                                            bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                            color="red",
-                                            weight=2,
-                                            fill_opacity=0.0,
-                                            popup=f"Animation: {current_date.strftime('%Y-%m-%d')}"
-                                        ).add_to(m_anim)
-                                            
-                                        # Add continuous heatmap
-                                        metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
-                                        heatmap_layer, legend_html = create_continuous_heatmap(
-                                            bounds, values_grid,
-                                            opacity=heatmap_opacity,
-                                            metric_name=f"{metric_description} - {current_date.strftime('%Y-%m-%d')}"
-                                        )
-                                        heatmap_layer.add_to(m_anim)
-                                        m_anim.get_root().html.add_child(folium.Element(legend_html))
-                                            
-                                        # Display the animation map
-                                        st_folium(m_anim, key=f"animation_map_{st.session_state.current_frame}", 
-                                                 width=800, height=600, returned_objects=[])
-                                        
-                                    # Show statistics for current frame
-                                    vmin, vmax = min(values), max(values)
-                                    st.subheader("📈 Current Frame Statistics")
-                                    col1, col2, col3 = st.columns(3)
-                                    with col1:
-                                        st.metric("Min", f"{vmin:.2f}")
-                                    with col2:
-                                        st.metric("Mean", f"{np.mean(values):.2f}")
-                                    with col3:
-                                        st.metric("Max", f"{vmax:.2f}")
-                                        
-                                    # Add distribution for current frame
-                                    with st.expander(f"📊 Distribution for {current_date.strftime('%Y-%m-%d')}", expanded=False):
-                                        metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
-                                        dist_fig = create_distribution_plot(values, selected_metric, metric_description)
-                                        if dist_fig:
-                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
-                                
-                            # Auto-advance frame
-                            time.sleep(animation_speed)
-                            st.session_state.current_frame = (st.session_state.current_frame + 1) % len(available_dates)
-                                
-                            # Stop animation when we complete one cycle
-                            if st.session_state.current_frame == 0:
-                                st.session_state.animation_running = False
-                                st.success("Animation cycle complete!")
-                                
-                            # Rerun to show next frame
-                            if st.session_state.animation_running:
-                                st.rerun()
-                            
-                        elif not st.session_state.get('animation_running', False) and available_dates:
-                            # Show static frame when not animating
-                            current_date = available_dates[st.session_state.get('current_frame', 0)]
-                            st.write(f"**Static view:** {current_date.strftime('%Y-%m-%d')}")
-                                
-                            gdf_date = gdf_filtered[gdf_filtered['date'] == current_date]
-                            if not gdf_date.empty:
-                                values_grid, values = create_heatmap_data(
-                                    gdf_date, bounds, selected_metric, reference_std=anim_ref_std, land_geom_aoi=land_mask_geom_for_aoi
-                                )
-                                    
-                                if values_grid is not None and values:
-                                    with spatial_placeholder.container():
-                                        if map_type == "Detailed":
-                                            m_static = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level
-                                            )
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Esri Satellite'
-                                            ).add_to(m_static)
-                                            folium.TileLayer(
-                                                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                attr='Esri',
-                                                name='Labels',
-                                                overlay=True
-                                            ).add_to(m_static)
-                                        elif map_type == "Terrain":
-                                            m_static = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="OpenStreetMap"
-                                            )
-                                        else:
-                                            m_static = folium.Map(
-                                                location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                zoom_start=map_zoom_level,
-                                                tiles="CartoDB positron"
-                                            )
-                                            
-                                        folium.Rectangle(
-                                            bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                            color="red",
-                                            weight=2,
-                                            fill_opacity=0.0
-                                        ).add_to(m_static)
-                                            
-                                        metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
-                                        heatmap_layer, legend_html = create_continuous_heatmap(
-                                            bounds, values_grid,
-                                            opacity=heatmap_opacity,
-                                            metric_name=metric_description
-                                        )
-                                        heatmap_layer.add_to(m_static)
-                                        m_static.get_root().html.add_child(folium.Element(legend_html))
-                                            
-                                        st_folium(m_static, key="static_animation_map", 
-                                                 width=800, height=600, returned_objects=[])
-                        
-                    elif viz_mode == "Time Series":
-                        mask = (
-                            (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
-                            (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
-                        )
-                        gdf_aoi = gdf_filtered[mask]
-                        gdf_aoi = filter_points_to_land(gdf_aoi, land_mask_geom_for_aoi)
-                            
-                        if not gdf_aoi.empty:
-                            if forecast_mode and selected_features:
-                                st.info("🔮 Generating forecast... This may take a moment.")
-                                    
-                                # Prepare data for forecasting
-                                daily_avg = gdf_aoi.groupby('date').agg({
-                                    forecast_target: 'mean',
-                                    **{feat: 'mean' for feat in selected_features if feat in gdf_aoi.columns}
-                                }).reset_index()
-                                    
-                                daily_avg = daily_avg.dropna(subset=[forecast_target])
-                                daily_avg_model = daily_avg.copy()
-                                smoothed_target_values, smoothing_note = _apply_target_smoothing(
-                                    daily_avg_model[forecast_target].astype(float).values,
-                                    target_smoothing_method,
-                                    target_smoothing_window,
-                                    dates=daily_avg_model["date"].values,
-                                )
-                                daily_avg_model[forecast_target] = smoothed_target_values
-                                if smoothing_note:
-                                    st.caption(smoothing_note)
-                                    
-                                if len(daily_avg) < 30:
-                                    st.error("⚠️ Insufficient historical data. Need at least 30 days.")
-                                else:
-                                    # FIXED: Prepare features with better NaN handling
-                                    df_ml, feature_names = prepare_ml_features(
-                                        daily_avg_model,
-                                        forecast_target,
-                                        selected_features,
-                                        lag_days=7
-                                    )
-                                        
-                                    if len(df_ml) < 20:
-                                        st.error(f"⚠️ Not enough data after feature engineering. Got {len(df_ml)} rows, need at least 20.")
-                                        st.info("💡 Try: (1) Using fewer features, (2) Longer historical period, or (3) Different forecast target")
+    
                                     else:
-                                        X = df_ml[feature_names]
-                                        y = df_ml[forecast_target]
-                                            
-                                        scaler = StandardScaler()
-                                        X_scaled = pd.DataFrame(
-                                            scaler.fit_transform(X),
-                                            columns=X.columns,
-                                            index=X.index
-                                        )
-                                            
-                                        # Generate future dates
-                                        last_date = daily_avg['date'].max()
-                                        future_dates = pd.date_range(
-                                            start=last_date + timedelta(days=1),
-                                            periods=forecast_horizon,
-                                            freq='D'
-                                        )
-                                            
-                                        # Create future features iteratively
-                                        st.session_state.forecast_insights_md = None
-                                        forecast_results = {}
-    
-                                        for method in forecast_methods:
-                                            if method == "Ensemble":
-                                                continue
-    
-                                            try:
-                                                if method == "Prophet":
-                                                    df_prophet = daily_avg_model[['date', forecast_target]].copy()
-                                                    df_prophet.columns = ['ds', 'y']
-                                                    predictions = train_prophet(df_prophet, forecast_horizon, model_params.get('Prophet'))
-    
-                                                elif method == "LLM Forecaster":
-                                                    predictions = train_llm_horizon_forecast(
-                                                        daily_avg_model,
-                                                        forecast_target,
-                                                        forecast_horizon,
-                                                        future_dates,
-                                                        model_params.get("LLM Forecaster"),
-                                                    )
-    
-                                                else:
-                                                    fblir_status = None
-                                                    if method == "FBLiR":
-                                                        fblir_status = st.empty()
-                                                        fblir_status.info("🔄 FBLiR is training (single fit for the full horizon)...")
-                                                    try:
-                                                        predictions = run_iterative_ml_forecast(
-                                                            method,
-                                                            X_scaled,
-                                                            y,
-                                                            feature_names,
-                                                            df_ml,
-                                                            selected_features,
-                                                            forecast_target,
-                                                            forecast_horizon,
-                                                            scaler,
-                                                            model_params,
-                                                        )
-                                                    finally:
-                                                        if fblir_status is not None:
-                                                            fblir_status.success("✅ FBLiR completed.")
-                                                            time.sleep(0.25)
-                                                            fblir_status.empty()
-
-                                                forecast_results[method] = predictions
-    
-                                            except Exception as e:
-                                                st.warning(f"⚠️ {method} failed: {str(e)}")
-    
-                                        # Calculate ensemble if requested
-                                        if "Ensemble" in forecast_methods and len(forecast_results) > 0:
-                                            ensemble_pred = np.mean(list(forecast_results.values()), axis=0)
-                                            forecast_results["Ensemble"] = ensemble_pred
-                                            
-                                        if forecast_results:
-                                            st.session_state.forecast_insights_md = generate_forecast_insights_markdown(
-                                                forecast_results,
-                                                daily_avg,
-                                                forecast_target,
-                                                future_dates,
-                                            )
-                                        else:
-                                            st.session_state.forecast_insights_md = None
-                                            
-                                        if forecast_results:
-                                            # Display forecast visualization in spatial_placeholder (col_map)
-                                            with spatial_placeholder.container():
-                                                plain_summary = _simple_forecast_findings_summary(
-                                                    forecast_results, daily_avg[forecast_target].astype(float).values, forecast_target, future_dates
-                                                )
-                                                _ins = st.session_state.get("forecast_insights_md")
-                                                if _ins:
-                                                    st.subheader("💡 Useful insights")
-                                                    if plain_summary:
-                                                        st.info(plain_summary)
-                                                    st.markdown(_ins)
-                                                    st.markdown("---")
-                                                y_hist = daily_avg[forecast_target].dropna().astype(float)
-                                                acf_fig_fc = None
-                                                if len(y_hist) > 14:
-                                                    acf_fig_fc = _acf_plotly(
-                                                        y_hist.values,
-                                                        title=f"ACF — {forecast_target} (historical AOI daily mean)",
-                                                        max_lag=min(40, max(5, len(y_hist) // 3)),
-                                                    )
-                                                metric_description_hist = AVAILABLE_PARAMETERS.get(
-                                                    forecast_target,
-                                                    "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
-                                                )
-
-                                                row1c1, row1c2 = st.columns(2, gap="large")
-                                                with row1c1:
-                                                    st.subheader("Forecast time series")
-                                                    fig = go.Figure()
-                                                    fig.add_trace(go.Scatter(
-                                                        x=daily_avg['date'],
-                                                        y=daily_avg[forecast_target],
-                                                        mode='lines',
-                                                        name='Historical',
-                                                        line=dict(color='blue', width=2),
-                                                    ))
-                                                    colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan']
-                                                    for idx, (method, predictions) in enumerate(forecast_results.items()):
-                                                        fig.add_trace(go.Scatter(
-                                                            x=future_dates,
-                                                            y=predictions,
-                                                            mode='lines',
-                                                            name=f'{method} forecast',
-                                                            line=dict(color=colors[idx % len(colors)], width=2, dash='dash'),
-                                                        ))
-                                                    fig.update_layout(
-                                                        title=f"{forecast_target} — historical + forecasts",
-                                                        xaxis_title="Date",
-                                                        yaxis_title=AVAILABLE_PARAMETERS.get(forecast_target, forecast_target),
-                                                        height=480,
-                                                        margin=dict(t=50, b=40),
-                                                        hovermode='x unified',
-                                                    )
-                                                    st.plotly_chart(fig, use_container_width=True, theme=None)
-
-                                                with row1c2:
-                                                    st.subheader("Spatial — latest historical")
-                                                    mask_aoi = (
-                                                        (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
-                                                        (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
-                                                    )
-                                                    gdf_spatial_data = gdf_filtered[mask_aoi]
-                                                    if not gdf_spatial_data.empty:
-                                                        valid_data = gdf_spatial_data[gdf_spatial_data[forecast_target].notna()]
-                                                        if not valid_data.empty:
-                                                            latest_date = valid_data['date'].max()
-                                                            gdf_latest = valid_data[valid_data['date'] == latest_date]
-                                                            hist_std = float(y_hist.std()) if len(y_hist) > 1 else 0.0
-                                                            if not np.isfinite(hist_std):
-                                                                hist_std = 0.0
-                                                            values_grid, heatmap_values = create_heatmap_data(
-                                                                gdf_latest,
-                                                                bounds,
-                                                                forecast_target,
-                                                                reference_std=hist_std,
-                                                                land_geom_aoi=land_mask_geom_for_aoi,
-                                                            )
-                                                            if values_grid is not None and heatmap_values and len(heatmap_values) > 0:
-                                                                if map_type == "Detailed":
-                                                                    m_forecast_spatial = folium.Map(
-                                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                                        zoom_start=map_zoom_level
-                                                                    )
-                                                                    folium.TileLayer(
-                                                                        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                                        attr='Esri',
-                                                                        name='Esri Satellite'
-                                                                    ).add_to(m_forecast_spatial)
-                                                                    folium.TileLayer(
-                                                                        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                                        attr='Esri',
-                                                                        name='Labels',
-                                                                        overlay=True
-                                                                    ).add_to(m_forecast_spatial)
-                                                                elif map_type == "Terrain":
-                                                                    m_forecast_spatial = folium.Map(
-                                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                                        zoom_start=map_zoom_level,
-                                                                        tiles="OpenStreetMap"
-                                                                    )
-                                                                else:
-                                                                    m_forecast_spatial = folium.Map(
-                                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                                        zoom_start=map_zoom_level,
-                                                                        tiles="CartoDB positron"
-                                                                    )
-                                                                folium.Rectangle(
-                                                                    bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                                                    color="red",
-                                                                    weight=2,
-                                                                    fill_opacity=0.0,
-                                                                    popup=f"Latest historical: {latest_date.strftime('%Y-%m-%d')}"
-                                                                ).add_to(m_forecast_spatial)
-                                                                heatmap_layer, legend_html = create_continuous_heatmap(
-                                                                    bounds, values_grid,
-                                                                    opacity=heatmap_opacity,
-                                                                    metric_name=f"{metric_description_hist} — {latest_date.strftime('%Y-%m-%d')}"
-                                                                )
-                                                                heatmap_layer.add_to(m_forecast_spatial)
-                                                                m_forecast_spatial.get_root().html.add_child(folium.Element(legend_html))
-                                                                st_folium(
-                                                                    m_forecast_spatial,
-                                                                    key="forecast_timeseries_spatial_map",
-                                                                    width=VIZ_FOLIUM_CELL_W,
-                                                                    height=VIZ_FOLIUM_CELL_H,
-                                                                    returned_objects=[],
-                                                                )
-                                                                # External legend below map (kept outside plot canvas).
-                                                                vmin_ext = float(np.nanmin(values_grid))
-                                                                vmax_ext = float(np.nanmax(values_grid))
-                                                                vrange_ext = vmax_ext - vmin_ext
-                                                                st.markdown(
-                                                                    f"""
-                                                                    <div style="margin-top:6px;padding:8px 10px;border:1px solid #c8d6e5;border-radius:8px;background:#ffffff;">
-                                                                      <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
-                                                                        {metric_description_hist} — {latest_date.strftime('%Y-%m-%d')}
-                                                                      </div>
-                                                                      <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#E3F2FD,#90CAF9,#42A5F5,#1E88E5,#1565C0,#0D47A1);"></div>
-                                                                      <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
-                                                                        <span>Min: {vmin_ext:.2f}</span>
-                                                                        <span>Max: {vmax_ext:.2f}</span>
-                                                                        <span>Range: {vrange_ext:.2f}</span>
-                                                                      </div>
-                                                                    </div>
-                                                                    """,
-                                                                    unsafe_allow_html=True,
-                                                                )
-                                                                st.caption(f"Latest: {latest_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points")
-                                                            else:
-                                                                st.info("Insufficient spatial points for this date.")
-                                                        else:
-                                                            st.info(f"No valid {forecast_target} in AOI for mapping.")
-                                                    else:
-                                                        st.info("No spatial data in AOI.")
-
-                                                row2c1, row2c2 = st.columns(2, gap="large")
-                                                with row2c1:
-                                                    st.subheader("Historical ACF")
-                                                    if acf_fig_fc is not None:
-                                                        st.plotly_chart(acf_fig_fc, use_container_width=True, theme=None)
-                                                    else:
-                                                        st.info("Not enough historical points for ACF (need more than 14 days).")
-                                                with row2c2:
-                                                    st.subheader("Historical distribution")
-                                                    dist_fig_fc = create_distribution_plot(
-                                                        y_hist.tolist(), forecast_target, metric_description_hist
-                                                    )
-                                                    if dist_fig_fc:
-                                                        dist_fig_fc.update_layout(
-                                                            title=f"{forecast_target} — AOI daily mean",
-                                                            height=420,
-                                                            margin=dict(t=50, b=40),
-                                                        )
-                                                        st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
-                                                    else:
-                                                        st.info("No distribution to show.")
-
-                                                # Residual diagnostics (before summary table)
-                                                residual_diagnostics = {}
-                                                fitted_by_method = {}
-                                                y_true_diag = np.asarray(y, dtype=float)
-                                                for method in forecast_results.keys():
-                                                    if method == "Ensemble":
-                                                        continue
-                                                    try:
-                                                        fitted = _fit_in_sample_predictions(
-                                                            method,
-                                                            X_scaled,
-                                                            y_true_diag,
-                                                            df_ml,
-                                                            forecast_target,
-                                                            model_params,
-                                                        )
-                                                        if fitted is None:
-                                                            residual_diagnostics[method] = {
-                                                                "error": "Residual diagnostics unavailable for this model."
-                                                            }
-                                                        else:
-                                                            fitted = np.asarray(fitted, dtype=float).ravel()
-                                                            fitted_by_method[method] = fitted
-                                                            residual_diagnostics[method] = _residual_diagnostic_bundle(
-                                                                y_true_diag, fitted, method
-                                                            )
-                                                    except Exception as diag_e:
-                                                        residual_diagnostics[method] = {"error": str(diag_e)}
-
-                                                if "Ensemble" in forecast_results:
-                                                    available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
-                                                    available = [np.asarray(a, dtype=float) for a in available if a is not None]
-                                                    if available:
-                                                        ens_fit = np.mean(np.vstack(available), axis=0)
-                                                        fitted_by_method["Ensemble"] = ens_fit
-                                                        residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
-                                                            y_true_diag, ens_fit, "Ensemble"
-                                                        )
-                                                    else:
-                                                        residual_diagnostics["Ensemble"] = {
-                                                            "error": "No base-model fitted values available for ensemble residual diagnostics."
-                                                        }
-
-                                                st.subheader("Residual diagnostics")
-                                                st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
-                                                tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
-                                                if tab_names:
-                                                    diag_tabs = st.tabs(tab_names)
-                                                    for t_i, m_name in enumerate(tab_names):
-                                                        with diag_tabs[t_i]:
-                                                            d = residual_diagnostics[m_name]
-                                                            if "error" in d:
-                                                                st.warning(d["error"])
-                                                            else:
-                                                                st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
-                                                                r1, r2 = st.columns(2)
-                                                                with r1:
-                                                                    st.plotly_chart(d["qq_fig"], use_container_width=True, theme=None)
-                                                                with r2:
-                                                                    st.plotly_chart(d["resid_fig"], use_container_width=True, theme=None)
-                                                                r3, r4 = st.columns(2)
-                                                                with r3:
-                                                                    st.plotly_chart(d["acf_fig"], use_container_width=True, theme=None)
-                                                                with r4:
-                                                                    residual_ts_fig = go.Figure()
-                                                                    residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
-                                                                    residual_ts_fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                                                                    residual_ts_fig.update_layout(
-                                                                        title=f"Residual time series — {m_name}",
-                                                                        xaxis_title="Index",
-                                                                        yaxis_title="Residual",
-                                                                        height=300,
-                                                                    )
-                                                                    st.plotly_chart(residual_ts_fig, use_container_width=True, theme=None)
-                                                else:
-                                                    st.info("Residual diagnostics unavailable for the selected models.")
-
-                                                summary_rows_fc = []
-                                                if len(y_hist):
-                                                    summary_rows_fc.append({
-                                                        "Series": "Historical (AOI daily mean)",
-                                                        "Mean": float(y_hist.mean()),
-                                                        "Min": float(y_hist.min()),
-                                                        "Max": float(y_hist.max()),
-                                                        "Std": float(y_hist.std()),
-                                                        "AIC": np.nan,
-                                                        "BIC": np.nan,
-                                                    })
-                                                for method, predictions in forecast_results.items():
-                                                    arr = np.asarray(predictions, dtype=float)
-                                                    fit_arr = fitted_by_method.get(method)
-                                                    k_eff = _estimate_effective_k(
-                                                        method,
-                                                        model_params,
-                                                        n_features=len(feature_names),
-                                                        n_selected_methods=max(1, len([m for m in forecast_results.keys() if m != "Ensemble"])),
-                                                    )
-                                                    if fit_arr is not None:
-                                                        aic_val, bic_val = _aic_bic_from_fit(y_true_diag, fit_arr, k_eff)
-                                                    else:
-                                                        aic_val, bic_val = (np.nan, np.nan)
-                                                    summary_rows_fc.append({
-                                                        "Series": f"Forecast — {method}",
-                                                        "Mean": float(np.mean(arr)),
-                                                        "Min": float(np.min(arr)),
-                                                        "Max": float(np.max(arr)),
-                                                        "Std": float(np.std(arr)),
-                                                        "AIC": aic_val,
-                                                        "BIC": bic_val,
-                                                    })
-                                                st.subheader("Summary statistics")
-                                                st.dataframe(
-                                                    pd.DataFrame(summary_rows_fc).round(3),
-                                                    use_container_width=True,
-                                                    hide_index=True,
-                                                )
-                                                st.session_state.forecast_report_payload = {
-                                                    "plain_summary": plain_summary,
-                                                    "insights_md": _ins,
-                                                    "summary_rows": summary_rows_fc,
-                                                    "forecast_fig": fig,
-                                                    "spatial_fig": _spatial_grid_plotly(
-                                                        values_grid if "values_grid" in locals() else None,
-                                                        bounds,
-                                                        "Spatial heatmap (latest historical snapshot)",
-                                                    ) if "values_grid" in locals() and values_grid is not None else None,
-                                                    "hist_acf_fig": acf_fig_fc,
-                                                    "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
-                                                    "residual_diagnostics": residual_diagnostics,
-                                                }
-                                            # Prepare export data (wide: date, features, target, forecast_*, row_type)
-                                            st.session_state.combined_export_data = build_forecast_export_wide(
-                                                daily_avg,
+                                        fblir_status = None
+                                        if method == "FBLiR":
+                                            fblir_status = st.empty()
+                                            fblir_status.info("🔄 FBLiR is training (single fit for the full horizon)...")
+                                        try:
+                                            predictions = run_iterative_ml_forecast(
+                                                method,
+                                                X_scaled,
+                                                y,
+                                                feature_names,
+                                                df_ml,
                                                 selected_features,
                                                 forecast_target,
-                                                future_dates,
-                                                forecast_results,
+                                                forecast_horizon,
+                                                scaler,
+                                                model_params,
                                             )
-                                                
-                                            # Store forecast frames for animation
-                                            st.session_state.forecast_frames = {
-                                                'dates': future_dates,
-                                                'forecasts': forecast_results,
-                                                'bounds': bounds
-                                            }
-                                            
-                                        else:
-                                            st.error("❌ All forecast methods failed")
-                                
+                                        finally:
+                                            if fblir_status is not None:
+                                                fblir_status.success("✅ FBLiR completed.")
+                                                time.sleep(0.25)
+                                                fblir_status.empty()
+
+                                    forecast_results[method] = predictions
+    
+                                except Exception as e:
+                                    st.warning(f"⚠️ {method} failed: {str(e)}")
+    
+                            # Calculate ensemble if requested
+                            if "Ensemble" in forecast_methods and len(forecast_results) > 0:
+                                ensemble_pred = np.mean(list(forecast_results.values()), axis=0)
+                                forecast_results["Ensemble"] = ensemble_pred
+
+                            forecast_results_display = {
+                                m: _inverse_target_transform_predictions(pred, log_transform_target)
+                                for m, pred in forecast_results.items()
+                            }
+
+                            if forecast_results:
+                                st.session_state.forecast_insights_md = generate_forecast_insights_markdown(
+                                    forecast_results_display,
+                                    daily_avg,
+                                    forecast_target,
+                                    future_dates,
+                                )
                             else:
-                                # Regular time series (no forecast)
-                                daily_avg = gdf_aoi.groupby('date')[selected_metric].mean().reset_index()
-                                latest_date = gdf_aoi['date'].max()
-                                gdf_latest = gdf_aoi[gdf_aoi['date'] == latest_date]
-                                values_grid = None
-                                heatmap_values = None
-                                if not gdf_latest.empty:
-                                    ts_ref_std = float(daily_avg[selected_metric].std())
-                                    if not np.isfinite(ts_ref_std):
-                                        ts_ref_std = 0.0
-                                    values_grid, heatmap_values = create_heatmap_data(
-                                        gdf_latest,
-                                        bounds,
-                                        selected_metric,
-                                        reference_std=ts_ref_std,
-                                    )
-
+                                st.session_state.forecast_insights_md = None
+                                            
+                            if forecast_results:
+                                # Display forecast visualization in spatial_placeholder (col_map)
                                 with spatial_placeholder.container():
-                                    ts1a, ts1b = st.columns(2, gap="large")
-                                    with ts1a:
-                                        st.subheader("Time series")
-                                        fig = px.line(
-                                            daily_avg,
-                                            x='date',
-                                            y=selected_metric,
-                                            title=f"{selected_metric} — AOI daily mean",
-                                            labels={'date': 'Date', selected_metric: AVAILABLE_PARAMETERS.get(selected_metric, selected_metric)}
-                                        )
-                                        fig.update_layout(height=480, margin=dict(t=50, b=40))
-                                        st.plotly_chart(fig, use_container_width=True, theme=None)
-                                    with ts1b:
-                                        st.subheader("Spatial — latest day")
-                                        if values_grid is not None and heatmap_values:
-                                            if map_type == "Detailed":
-                                                m_timeseries = folium.Map(
-                                                    location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                    zoom_start=map_zoom_level
-                                                )
-                                                folium.TileLayer(
-                                                    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                    attr='Esri',
-                                                    name='Esri Satellite'
-                                                ).add_to(m_timeseries)
-                                                folium.TileLayer(
-                                                    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                    attr='Esri',
-                                                    name='Labels',
-                                                    overlay=True
-                                                ).add_to(m_timeseries)
-                                            elif map_type == "Terrain":
-                                                m_timeseries = folium.Map(
-                                                    location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                    zoom_start=map_zoom_level,
-                                                    tiles="OpenStreetMap"
-                                                )
-                                            else:
-                                                m_timeseries = folium.Map(
-                                                    location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                    zoom_start=map_zoom_level,
-                                                    tiles="CartoDB positron"
-                                                )
-                                            folium.Rectangle(
-                                                bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                                color="red",
-                                                weight=2,
-                                                fill_opacity=0.0,
-                                                popup=f"Latest: {latest_date.strftime('%Y-%m-%d')}"
-                                            ).add_to(m_timeseries)
-                                            metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
-                                            heatmap_layer, legend_html = create_continuous_heatmap(
-                                                bounds, values_grid,
-                                                opacity=heatmap_opacity,
-                                                metric_name=metric_description
-                                            )
-                                            heatmap_layer.add_to(m_timeseries)
-                                            m_timeseries.get_root().html.add_child(folium.Element(legend_html))
-                                            st_folium(
-                                                m_timeseries,
-                                                key="timeseries_spatial_map",
-                                                width=VIZ_FOLIUM_CELL_W,
-                                                height=VIZ_FOLIUM_CELL_H,
-                                                returned_objects=[],
-                                            )
-                                            st.caption(f"Latest date: {latest_date.strftime('%Y-%m-%d')}")
-                                        else:
-                                            st.info("No spatial heatmap available for the latest date.")
-
-                                    y_ts = daily_avg[selected_metric].dropna().astype(float)
-                                    acf_ts = None
-                                    if len(y_ts) > 14:
-                                        acf_ts = _acf_plotly(
-                                            y_ts.values,
-                                            title=f"ACF — {selected_metric} (AOI daily mean)",
-                                            max_lag=min(40, max(5, len(y_ts) // 3)),
-                                        )
-                                    metric_description = AVAILABLE_PARAMETERS.get(
-                                        selected_metric,
-                                        "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating"
+                                    plain_summary = _simple_forecast_findings_summary(
+                                        forecast_results_display,
+                                        daily_avg[forecast_target].astype(float).values,
+                                        forecast_target,
+                                        future_dates,
                                     )
-                                    ts2a, ts2b = st.columns(2, gap="large")
-                                    with ts2a:
-                                        st.subheader("ACF")
-                                        if acf_ts is not None:
-                                            st.plotly_chart(acf_ts, use_container_width=True, theme=None)
+                                    _ins = st.session_state.get("forecast_insights_md")
+                                    if _ins:
+                                        st.subheader("💡 Useful insights")
+                                        if plain_summary:
+                                            st.info(plain_summary)
+                                        st.markdown(_ins)
+                                        st.markdown("---")
+                                    y_hist = daily_avg[forecast_target].dropna().astype(float)
+                                    acf_fig_fc = None
+                                    if len(y_hist) > 14:
+                                        acf_fig_fc = _acf_plotly(
+                                            y_hist.values,
+                                            title=f"ACF — {forecast_target} (historical AOI daily mean)",
+                                            max_lag=min(40, max(5, len(y_hist) // 3)),
+                                        )
+                                    metric_description_hist = AVAILABLE_PARAMETERS.get(
+                                        forecast_target,
+                                        "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
+                                    )
+
+                                    row1c1, row1c2 = st.columns(2, gap="large")
+                                    with row1c1:
+                                        st.subheader("Forecast time series")
+                                        fig = go.Figure()
+                                        fig.add_trace(go.Scatter(
+                                            x=daily_avg['date'],
+                                            y=daily_avg[forecast_target],
+                                            mode='lines',
+                                            name='Historical',
+                                            line=dict(color='blue', width=2),
+                                        ))
+                                        colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan']
+                                        for idx, (method, predictions) in enumerate(forecast_results_display.items()):
+                                            fig.add_trace(go.Scatter(
+                                                x=future_dates,
+                                                y=predictions,
+                                                mode='lines',
+                                                name=f'{method} forecast',
+                                                line=dict(color=colors[idx % len(colors)], width=2, dash='dash'),
+                                            ))
+                                        fig.update_layout(
+                                            title=f"{forecast_target} — historical + forecasts",
+                                            xaxis_title="Date",
+                                            yaxis_title=AVAILABLE_PARAMETERS.get(forecast_target, forecast_target),
+                                            height=480,
+                                            margin=dict(t=50, b=40),
+                                            hovermode='x unified',
+                                        )
+                                        st.plotly_chart(fig, use_container_width=True, theme=None)
+
+                                    with row1c2:
+                                        mask_aoi = (
+                                            (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
+                                            (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
+                                        )
+                                        gdf_spatial_data = gdf_filtered[mask_aoi]
+                                        if not gdf_spatial_data.empty:
+                                            valid_data = gdf_spatial_data[gdf_spatial_data[forecast_target].notna()]
+                                            if not valid_data.empty:
+                                                vf = valid_data.copy()
+                                                vf["_dts"] = pd.to_datetime(vf["date"])
+                                                sd_hist = pd.Timestamp(start_date)
+                                                ed_hist = pd.Timestamp(end_date)
+                                                in_rng = (vf["_dts"] >= sd_hist) & (vf["_dts"] <= ed_hist)
+                                                avail_map_dates = sorted(vf.loc[in_rng, "date"].unique())
+                                                if not avail_map_dates:
+                                                    avail_map_dates = sorted(vf["date"].unique())
+                                                chosen_hist_date = st.selectbox(
+                                                    "Historical heatmap date",
+                                                    options=avail_map_dates,
+                                                    index=len(avail_map_dates) - 1,
+                                                    format_func=lambda x: pd.Timestamp(x).strftime("%Y-%m-%d"),
+                                                    key="forecast_spatial_hist_date",
+                                                    help=(
+                                                        "Pick any AOI coverage date inside your sidebar historical window "
+                                                        f"({start_date} to {end_date})."
+                                                    ),
+                                                )
+                                                st.subheader("Spatial — historical heatmap")
+                                                gdf_latest = valid_data[valid_data["date"] == chosen_hist_date]
+                                                hist_std = float(y_hist.std()) if len(y_hist) > 1 else 0.0
+                                                if not np.isfinite(hist_std):
+                                                    hist_std = 0.0
+                                                values_grid, heatmap_values = create_heatmap_data(
+                                                    gdf_latest,
+                                                    bounds,
+                                                    forecast_target,
+                                                    reference_std=hist_std,
+                                                    land_geom_aoi=land_mask_geom_for_aoi,
+                                                )
+                                                if values_grid is not None and heatmap_values and len(heatmap_values) > 0:
+                                                    if map_type == "Detailed":
+                                                        m_forecast_spatial = folium.Map(
+                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                            zoom_start=map_zoom_level
+                                                        )
+                                                        folium.TileLayer(
+                                                            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                                                            attr='Esri',
+                                                            name='Esri Satellite'
+                                                        ).add_to(m_forecast_spatial)
+                                                        folium.TileLayer(
+                                                            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+                                                            attr='Esri',
+                                                            name='Labels',
+                                                            overlay=True
+                                                        ).add_to(m_forecast_spatial)
+                                                    elif map_type == "Terrain":
+                                                        m_forecast_spatial = folium.Map(
+                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                            zoom_start=map_zoom_level,
+                                                            tiles="OpenStreetMap"
+                                                        )
+                                                    else:
+                                                        m_forecast_spatial = folium.Map(
+                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                            zoom_start=map_zoom_level,
+                                                            tiles="CartoDB positron"
+                                                        )
+                                                    folium.Rectangle(
+                                                        bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
+                                                        color="red",
+                                                        weight=2,
+                                                        fill_opacity=0.0,
+                                                        popup=f"Historical: {chosen_hist_date.strftime('%Y-%m-%d')}"
+                                                    ).add_to(m_forecast_spatial)
+                                                    heatmap_layer, legend_html = create_continuous_heatmap(
+                                                        bounds, values_grid,
+                                                        opacity=heatmap_opacity,
+                                                        metric_name=f"{metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}",
+                                                        color_scheme="red",
+                                                    )
+                                                    heatmap_layer.add_to(m_forecast_spatial)
+                                                    m_forecast_spatial.get_root().html.add_child(folium.Element(legend_html))
+                                                    st_folium(
+                                                        m_forecast_spatial,
+                                                        key=f"forecast_timeseries_spatial_map_{chosen_hist_date}",
+                                                        width=VIZ_FOLIUM_CELL_W,
+                                                        height=VIZ_FOLIUM_CELL_H,
+                                                        returned_objects=[],
+                                                    )
+                                                    vmin_ext = float(np.nanmin(values_grid))
+                                                    vmax_ext = float(np.nanmax(values_grid))
+                                                    vrange_ext = vmax_ext - vmin_ext
+                                                    st.markdown(
+                                                        f"""
+                                                        <div style="margin-top:6px;padding:8px 10px;border:1px solid #fecaca;border-radius:8px;background:#ffffff;">
+                                                          <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
+                                                            {metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}
+                                                          </div>
+                                                          <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#FFF8F8,#FFCDD2,#E57373,#E53935,#C62828,#7F0000);"></div>
+                                                          <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
+                                                            <span>Min: {vmin_ext:.2f}</span>
+                                                            <span>Max: {vmax_ext:.2f}</span>
+                                                            <span>Range: {vrange_ext:.2f}</span>
+                                                          </div>
+                                                        </div>
+                                                        """,
+                                                        unsafe_allow_html=True,
+                                                    )
+                                                    st.caption(f"{chosen_hist_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points")
+                                                else:
+                                                    st.info("Insufficient spatial points for this date.")
+                                            else:
+                                                st.info(f"No valid {forecast_target} in AOI for mapping.")
+                                        else:
+                                            st.info("No spatial data in AOI.")
+
+                                    row2c1, row2c2 = st.columns(2, gap="large")
+                                    with row2c1:
+                                        st.subheader("Historical ACF")
+                                        if acf_fig_fc is not None:
+                                            st.plotly_chart(acf_fig_fc, use_container_width=True, theme=None)
                                         else:
                                             st.info("Not enough historical points for ACF (need more than 14 days).")
-                                    with ts2b:
-                                        st.subheader("Distribution")
-                                        time_series_values = daily_avg[selected_metric].dropna().tolist()
-                                        dist_fig = create_distribution_plot(time_series_values, selected_metric, metric_description)
-                                        if dist_fig:
-                                            dist_fig.update_layout(
-                                                title=f"{selected_metric} — AOI daily mean",
+                                    with row2c2:
+                                        st.subheader("Historical distribution")
+                                        dist_fig_fc = create_distribution_plot(
+                                            y_hist.tolist(), forecast_target, metric_description_hist
+                                        )
+                                        if dist_fig_fc:
+                                            dist_fig_fc.update_layout(
+                                                title=f"{forecast_target} — AOI daily mean",
                                                 height=420,
                                                 margin=dict(t=50, b=40),
                                             )
-                                            st.plotly_chart(dist_fig, use_container_width=True, theme=None)
+                                            st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
                                         else:
                                             st.info("No distribution to show.")
 
-                                    time_series_values = daily_avg[selected_metric].dropna().tolist()
-                                    if time_series_values:
-                                        summary_ts = [{
-                                            "Series": f"{selected_metric} (AOI daily mean)",
-                                            "Mean": float(np.mean(time_series_values)),
-                                            "Std": float(np.std(time_series_values)),
-                                            "Min": float(np.min(time_series_values)),
-                                            "Max": float(np.max(time_series_values)),
-                                            "Median": float(np.median(time_series_values)),
-                                            "P25": float(np.percentile(time_series_values, 25)),
-                                            "P75": float(np.percentile(time_series_values, 75)),
-                                        }]
-                                        if selected_metric == "AFDR":
-                                            avg_afdr = float(np.mean(time_series_values))
-                                            category, emoji = get_afdr_category(avg_afdr)
-                                            st.info(f"{emoji} **Average AFDR category:** {category}")
-                                        st.subheader("Summary statistics")
-                                        st.dataframe(
-                                            pd.DataFrame(summary_ts).round(3),
-                                            use_container_width=True,
-                                            hide_index=True,
+                                    # Residual diagnostics (before summary table)
+                                    residual_diagnostics = {}
+                                    fitted_by_method = {}
+                                    y_true_diag = np.asarray(y, dtype=float)
+                                    for method in forecast_results.keys():
+                                        if method == "Ensemble":
+                                            continue
+                                        try:
+                                            fitted = _fit_in_sample_predictions(
+                                                method,
+                                                X_scaled,
+                                                y_true_diag,
+                                                df_ml,
+                                                forecast_target,
+                                                model_params,
+                                            )
+                                            if fitted is None:
+                                                residual_diagnostics[method] = {
+                                                    "error": "Residual diagnostics unavailable for this model."
+                                                }
+                                            else:
+                                                fitted = np.asarray(fitted, dtype=float).ravel()
+                                                fitted_by_method[method] = fitted
+                                                residual_diagnostics[method] = _residual_diagnostic_bundle(
+                                                    y_true_diag, fitted, method
+                                                )
+                                        except Exception as diag_e:
+                                            residual_diagnostics[method] = {"error": str(diag_e)}
+
+                                    if "Ensemble" in forecast_results:
+                                        available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
+                                        available = [np.asarray(a, dtype=float) for a in available if a is not None]
+                                        if available:
+                                            ens_fit = np.mean(np.vstack(available), axis=0)
+                                            fitted_by_method["Ensemble"] = ens_fit
+                                            residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
+                                                y_true_diag, ens_fit, "Ensemble"
+                                            )
+                                        else:
+                                            residual_diagnostics["Ensemble"] = {
+                                                "error": "No base-model fitted values available for ensemble residual diagnostics."
+                                            }
+
+                                    st.subheader("Residual diagnostics")
+                                    st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
+                                    tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
+                                    if tab_names:
+                                        diag_tabs = st.tabs(tab_names)
+                                        for t_i, m_name in enumerate(tab_names):
+                                            with diag_tabs[t_i]:
+                                                d = residual_diagnostics[m_name]
+                                                if "error" in d:
+                                                    st.warning(d["error"])
+                                                else:
+                                                    st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
+                                                    r1, r2 = st.columns(2)
+                                                    with r1:
+                                                        st.plotly_chart(d["qq_fig"], use_container_width=True, theme=None)
+                                                    with r2:
+                                                        st.plotly_chart(d["resid_fig"], use_container_width=True, theme=None)
+                                                    r3, r4 = st.columns(2)
+                                                    with r3:
+                                                        st.plotly_chart(d["acf_fig"], use_container_width=True, theme=None)
+                                                    with r4:
+                                                        residual_ts_fig = go.Figure()
+                                                        residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
+                                                        residual_ts_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                                                        residual_ts_fig.update_layout(
+                                                            title=f"Residual time series — {m_name}",
+                                                            xaxis_title="Index",
+                                                            yaxis_title="Residual",
+                                                            height=300,
+                                                        )
+                                                        st.plotly_chart(residual_ts_fig, use_container_width=True, theme=None)
+                                    else:
+                                        st.info("Residual diagnostics unavailable for the selected models.")
+
+                                    summary_rows_fc = []
+                                    if len(y_hist):
+                                        summary_rows_fc.append({
+                                            "Series": "Historical (AOI daily mean)",
+                                            "Mean": float(y_hist.mean()),
+                                            "Min": float(y_hist.min()),
+                                            "Max": float(y_hist.max()),
+                                            "Std": float(y_hist.std()),
+                                            "AIC": np.nan,
+                                            "BIC": np.nan,
+                                        })
+                                    for method, predictions in forecast_results_display.items():
+                                        arr = np.asarray(predictions, dtype=float)
+                                        fit_arr = fitted_by_method.get(method)
+                                        k_eff = _estimate_effective_k(
+                                            method,
+                                            model_params,
+                                            n_features=len(feature_names),
+                                            n_selected_methods=max(1, len([m for m in forecast_results.keys() if m != "Ensemble"])),
                                         )
-                    elif viz_mode == "Forecast Animation":
-                        if st.session_state.forecast_frames is None:
-                            st.info("👆 Please view Time Series first to generate forecast")
-                        else:
-                            frames_data = st.session_state.forecast_frames
-                            future_dates = frames_data['dates']
-                            forecast_results = frames_data['forecasts']
-                            bounds = frames_data['bounds']
+                                        if fit_arr is not None:
+                                            aic_val, bic_val = _aic_bic_from_fit(y_true_diag, fit_arr, k_eff)
+                                        else:
+                                            aic_val, bic_val = (np.nan, np.nan)
+                                        summary_rows_fc.append({
+                                            "Series": f"Forecast — {method}",
+                                            "Mean": float(np.mean(arr)),
+                                            "Min": float(np.min(arr)),
+                                            "Max": float(np.max(arr)),
+                                            "Std": float(np.std(arr)),
+                                            "AIC": aic_val,
+                                            "BIC": bic_val,
+                                        })
+                                    st.subheader("Summary statistics")
+                                    st.dataframe(
+                                        pd.DataFrame(summary_rows_fc).round(3),
+                                        use_container_width=True,
+                                        hide_index=True,
+                                    )
+                                    st.session_state.forecast_report_payload = {
+                                        "plain_summary": plain_summary,
+                                        "insights_md": _ins,
+                                        "summary_rows": summary_rows_fc,
+                                        "forecast_fig": fig,
+                                        "spatial_fig": _spatial_grid_plotly(
+                                            values_grid if "values_grid" in locals() else None,
+                                            bounds,
+                                            "Spatial heatmap (historical snapshot)",
+                                            colorscale="Reds",
+                                        ) if "values_grid" in locals() and values_grid is not None else None,
+                                        "hist_acf_fig": acf_fig_fc,
+                                        "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
+                                        "residual_diagnostics": residual_diagnostics,
+                                    }
+                                # Prepare export data (wide: date, features, target, forecast_*, row_type)
+                                st.session_state.combined_export_data = build_forecast_export_wide(
+                                    daily_avg,
+                                    selected_features,
+                                    forecast_target,
+                                    future_dates,
+                                    forecast_results_display,
+                                )
+
+                            else:
+                                st.error("❌ All forecast methods failed")
                                 
-                            # Select forecast method to animate
-                            selected_forecast_method = st.selectbox(
-                                "Select Forecast Method",
-                                options=list(forecast_results.keys()),
-                                key="forecast_animation_method"
+                else:
+                    # Regular time series (no forecast)
+                    daily_avg = gdf_aoi.groupby('date')[selected_metric].mean().reset_index()
+                    latest_date = gdf_aoi['date'].max()
+                    gdf_latest = gdf_aoi[gdf_aoi['date'] == latest_date]
+                    values_grid = None
+                    heatmap_values = None
+                    if not gdf_latest.empty:
+                        ts_ref_std = float(daily_avg[selected_metric].std())
+                        if not np.isfinite(ts_ref_std):
+                            ts_ref_std = 0.0
+                        values_grid, heatmap_values = create_heatmap_data(
+                            gdf_latest,
+                            bounds,
+                            selected_metric,
+                            reference_std=ts_ref_std,
+                        )
+
+                    with spatial_placeholder.container():
+                        ts1a, ts1b = st.columns(2, gap="large")
+                        with ts1a:
+                            st.subheader("Time series")
+                            fig = px.line(
+                                daily_avg,
+                                x='date',
+                                y=selected_metric,
+                                title=f"{selected_metric} — AOI daily mean",
+                                labels={'date': 'Date', selected_metric: AVAILABLE_PARAMETERS.get(selected_metric, selected_metric)}
                             )
-                                
-                            predictions = forecast_results[selected_forecast_method]
-                                
-                            # Animation controls
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                if st.button("▶️ Start Forecast", key="start_forecast_anim"):
-                                    st.session_state.animation_running = True
-                                    st.session_state.current_frame = 0
-                                    st.rerun()
-                                
-                            with col2:
-                                if st.button("⏸️ Pause", key="pause_forecast_anim"):
-                                    st.session_state.animation_running = False
-                                    st.rerun()
-                                
-                            # Frame selector
-                            current_frame = st.slider(
-                                "Select Forecast Day",
-                                min_value=0,
-                                max_value=len(predictions) - 1,
-                                value=st.session_state.get('current_frame', 0),
-                                key="frame_slider"
-                            )
-                                
-                            st.session_state.current_frame = current_frame
-                                
-                            # Display current forecast
-                            current_date = future_dates[current_frame]
-                            current_value = predictions[current_frame]
-                                
-                            st.write(f"**Forecast Date:** {current_date.strftime('%Y-%m-%d')}")
-                            st.write(f"**Predicted {forecast_target}:** {current_value:.2f}")
-                                
-                            # Statistics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("Current Value", f"{current_value:.2f}")
-                            with col2:
-                                if current_frame > 0:
-                                    prev_value = predictions[current_frame - 1]
-                                    delta = current_value - prev_value
-                                    st.metric("Change from Previous", f"{delta:+.2f}")
-                            with col3:
-                                st.metric("Period Max", f"{np.max(predictions):.2f}")
-                                
-                            # FIXED: Create continuous heatmap for forecast
-                            values_grid = create_forecast_heatmap_grid(bounds, current_value, grid_size=50)
-                                
-                            with spatial_placeholder.container():
+                            fig.update_layout(height=480, margin=dict(t=50, b=40))
+                            st.plotly_chart(fig, use_container_width=True, theme=None)
+                        with ts1b:
+                            st.subheader("Spatial — latest day")
+                            if values_grid is not None and heatmap_values:
                                 if map_type == "Detailed":
-                                    m_forecast = folium.Map(
+                                    m_timeseries = folium.Map(
                                         location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
                                         zoom_start=map_zoom_level
                                     )
@@ -4529,116 +4041,156 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
                                         attr='Esri',
                                         name='Esri Satellite'
-                                    ).add_to(m_forecast)
+                                    ).add_to(m_timeseries)
                                     folium.TileLayer(
                                         tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
                                         attr='Esri',
                                         name='Labels',
                                         overlay=True
-                                    ).add_to(m_forecast)
+                                    ).add_to(m_timeseries)
                                 elif map_type == "Terrain":
-                                    m_forecast = folium.Map(
+                                    m_timeseries = folium.Map(
                                         location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
                                         zoom_start=map_zoom_level,
                                         tiles="OpenStreetMap"
                                     )
                                 else:
-                                    m_forecast = folium.Map(
+                                    m_timeseries = folium.Map(
                                         location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
                                         zoom_start=map_zoom_level,
                                         tiles="CartoDB positron"
                                     )
-                                    
                                 folium.Rectangle(
                                     bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
                                     color="red",
                                     weight=2,
                                     fill_opacity=0.0,
-                                    popup=f"Forecast: {current_date.strftime('%Y-%m-%d')}"
-                                ).add_to(m_forecast)
-                                    
-                                # Add continuous heatmap layer with dynamic legend
-                                metric_description = AVAILABLE_PARAMETERS.get(forecast_target, "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target)
+                                    popup=f"Latest: {latest_date.strftime('%Y-%m-%d')}"
+                                ).add_to(m_timeseries)
+                                metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
                                 heatmap_layer, legend_html = create_continuous_heatmap(
                                     bounds, values_grid,
                                     opacity=heatmap_opacity,
-                                    metric_name=f"Forecast: {metric_description}"
+                                    metric_name=metric_description
                                 )
-                                heatmap_layer.add_to(m_forecast)
-                                    
-                                # Add legend to map
-                                m_forecast.get_root().html.add_child(folium.Element(legend_html))
-                                    
+                                heatmap_layer.add_to(m_timeseries)
+                                m_timeseries.get_root().html.add_child(folium.Element(legend_html))
                                 st_folium(
-                                    m_forecast,
-                                    key=f"forecast_map_{current_frame}",
+                                    m_timeseries,
+                                    key="timeseries_spatial_map",
                                     width=VIZ_FOLIUM_CELL_W,
                                     height=VIZ_FOLIUM_CELL_H,
                                     returned_objects=[],
                                 )
-                                
-                            # Auto-advance if animating
-                            if st.session_state.get('animation_running', False):
-                                time.sleep(animation_speed)
-                                st.session_state.current_frame = (st.session_state.current_frame + 1) % len(predictions)
-                                    
-                                if st.session_state.current_frame == 0:
-                                    st.session_state.animation_running = False
-                                    st.success("Animation cycle complete!")
-                                    
-                                if st.session_state.animation_running:
-                                    st.rerun()
-                    
-                    # Export functionality
-                    st.subheader("💾 Export Data")
-                    
-                    if forecast_mode and 'combined_export_data' in st.session_state:
-                        st.write(
-                            "Wide CSV: **`date`**, selected **feature** columns (AOI daily means), "
-                            f"**`{forecast_target}`** (target), one **`forecast_*`** column per model, "
-                            "and **`row_type`** (`historical` / `forecast`). "
-                            "Future rows have missing observed features and target—model outputs are in **`forecast_*`**."
+                                st.caption(f"Latest date: {latest_date.strftime('%Y-%m-%d')}")
+                            else:
+                                st.info("No spatial heatmap available for the latest date.")
+
+                        y_ts = daily_avg[selected_metric].dropna().astype(float)
+                        acf_ts = None
+                        if len(y_ts) > 14:
+                            acf_ts = _acf_plotly(
+                                y_ts.values,
+                                title=f"ACF — {selected_metric} (AOI daily mean)",
+                                max_lag=min(40, max(5, len(y_ts) // 3)),
+                            )
+                        metric_description = AVAILABLE_PARAMETERS.get(
+                            selected_metric,
+                            "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating"
                         )
-                        export_data = st.session_state.combined_export_data
+                        ts2a, ts2b = st.columns(2, gap="large")
+                        with ts2a:
+                            st.subheader("ACF")
+                            if acf_ts is not None:
+                                st.plotly_chart(acf_ts, use_container_width=True, theme=None)
+                            else:
+                                st.info("Not enough historical points for ACF (need more than 14 days).")
+                        with ts2b:
+                            st.subheader("Distribution")
+                            time_series_values = daily_avg[selected_metric].dropna().tolist()
+                            dist_fig = create_distribution_plot(time_series_values, selected_metric, metric_description)
+                            if dist_fig:
+                                dist_fig.update_layout(
+                                    title=f"{selected_metric} — AOI daily mean",
+                                    height=420,
+                                    margin=dict(t=50, b=40),
+                                )
+                                st.plotly_chart(dist_fig, use_container_width=True, theme=None)
+                            else:
+                                st.info("No distribution to show.")
+
+                        time_series_values = daily_avg[selected_metric].dropna().tolist()
+                        if time_series_values:
+                            summary_ts = [{
+                                "Series": f"{selected_metric} (AOI daily mean)",
+                                "Mean": float(np.mean(time_series_values)),
+                                "Std": float(np.std(time_series_values)),
+                                "Min": float(np.min(time_series_values)),
+                                "Max": float(np.max(time_series_values)),
+                                "Median": float(np.median(time_series_values)),
+                                "P25": float(np.percentile(time_series_values, 25)),
+                                "P75": float(np.percentile(time_series_values, 75)),
+                            }]
+                            if selected_metric == "AFDR":
+                                avg_afdr = float(np.mean(time_series_values))
+                                category, emoji = get_afdr_category(avg_afdr)
+                                st.info(f"{emoji} **Average AFDR category:** {category}")
+                            st.subheader("Summary statistics")
+                            st.dataframe(
+                                pd.DataFrame(summary_ts).round(3),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+            # Export functionality
+            st.subheader("💾 Export Data")
+                    
+            if forecast_mode and 'combined_export_data' in st.session_state:
+                st.write(
+                    "Wide CSV: **`date`**, selected **feature** columns (AOI daily means), "
+                    f"**`{forecast_target}`** (target), one **`forecast_*`** column per model, "
+                    "and **`row_type`** (`historical` / `forecast`). "
+                    "Future rows have missing observed features and target—model outputs are in **`forecast_*`**."
+                )
+                export_data = st.session_state.combined_export_data
+                csv_buffer = StringIO()
+                export_data.to_csv(csv_buffer, index=False)
+                csv_str = csv_buffer.getvalue()
+
+                st.download_button(
+                    label="⬇️ Export Historical + Forecast CSV",
+                    data=csv_str,
+                    file_name=f"{forecast_target}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
+                    mime="text/csv",
+                    key="download_forecast_csv",
+                )
+                    
+            else:
+                export_params = st.multiselect(
+                    "Select parameters to export",
+                    options=list(AVAILABLE_PARAMETERS.keys()) + ["FWI", "AFDR"],
+                    default=[selected_metric],
+                    key="export_params_regular"
+                )
+                        
+                if st.button("📥 Export to CSV", key="export_regular"):
+                    if export_params:
+                        export_cols = ['lat', 'lon', 'date'] + export_params
+                        export_data = gdf_filtered[export_cols].copy()
+                                
                         csv_buffer = StringIO()
                         export_data.to_csv(csv_buffer, index=False)
                         csv_str = csv_buffer.getvalue()
-
+                                
                         st.download_button(
-                            label="⬇️ Export Historical + Forecast CSV",
+                            label="⬇️ Download CSV",
                             data=csv_str,
-                            file_name=f"{forecast_target}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
-                            mime="text/csv",
-                            key="download_forecast_csv",
+                            file_name=f"power_data_{start_date}_{end_date}.csv",
+                            mime="text/csv"
                         )
-                    
+                                
+                        st.success(f"Prepared {len(export_data)} records for export")
                     else:
-                        export_params = st.multiselect(
-                            "Select parameters to export",
-                            options=list(AVAILABLE_PARAMETERS.keys()) + ["FWI", "AFDR"],
-                            default=[selected_metric],
-                            key="export_params_regular"
-                        )
-                        
-                        if st.button("📥 Export to CSV", key="export_regular"):
-                            if export_params:
-                                export_cols = ['lat', 'lon', 'date'] + export_params
-                                export_data = gdf_filtered[export_cols].copy()
-                                
-                                csv_buffer = StringIO()
-                                export_data.to_csv(csv_buffer, index=False)
-                                csv_str = csv_buffer.getvalue()
-                                
-                                st.download_button(
-                                    label="⬇️ Download CSV",
-                                    data=csv_str,
-                                    file_name=f"power_data_{start_date}_{end_date}.csv",
-                                    mime="text/csv"
-                                )
-                                
-                                st.success(f"Prepared {len(export_data)} records for export")
-                            else:
-                                st.warning("Select at least one parameter")
+                        st.warning("Select at least one parameter")
 
 
 st.markdown("---")
