@@ -2324,6 +2324,18 @@ def run_iterative_ml_forecast(
     predictions = []
     current_data = df_ml.copy()
 
+    # Recursive linear models can extrapolate without bound in model space (e.g. ln(1+y)).
+    # Small upward drift in z becomes enormous after expm1 when plotting on the original scale.
+    y_fit = np.asarray(y, dtype=float).ravel()
+    y_fit = y_fit[np.isfinite(y_fit)]
+    train_z_min = float(np.min(y_fit)) if len(y_fit) else -np.inf
+    train_z_max = float(np.max(y_fit)) if len(y_fit) else np.inf
+    z_span = max(train_z_max - train_z_min, 1e-6)
+    # Allow modest extrapolation beyond the training band but block pathological blow-ups.
+    linear_recursive_margin = float(min(1.0, 0.2 + 0.35 * z_span))
+    linear_z_lo = train_z_min - linear_recursive_margin
+    linear_z_hi = train_z_max + linear_recursive_margin
+
     if method == "Linear Regression":
         model = LinearRegression()
         model.fit(X_scaled, y)
@@ -2434,6 +2446,8 @@ def run_iterative_ml_forecast(
             columns=feature_names,
         )
         pred = predict_one(last_row_scaled)
+        if method in ("Linear Regression", "Bayesian Linear Regression"):
+            pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         predictions.append(pred)
 
         new_date = current_data["date"].iloc[-1] + timedelta(days=1)
