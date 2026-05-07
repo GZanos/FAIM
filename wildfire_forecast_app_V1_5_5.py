@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from io import StringIO, BytesIO
 import json
+import hashlib
 import html as html_module
 import re
 from pathlib import Path
@@ -2016,12 +2017,14 @@ def _estimate_effective_k(method, model_params, n_features, n_selected_methods):
     """Approximate model complexity for information criteria benchmarking."""
     if method in ("Linear Regression", "Bayesian Linear Regression"):
         return int(n_features) + 1
+    # Tree/boosting: using n_estimators as literal parameter count makes AIC penalties enormous vs linear models
+    # and misleading when comparing rows. Use a capped effective-parameter proxy for exploratory IC display only.
     if method == "Random Forest":
-        return int((model_params.get("Random Forest") or {}).get("n_estimators", 100))
+        return max(5, min(int(n_features) + 8, 45))
     if method == "Gradient Boosting":
-        return int((model_params.get("Gradient Boosting") or {}).get("n_estimators", 100))
+        return max(5, min(int(n_features) + 8, 45))
     if method == "XGBoost":
-        return int((model_params.get("XGBoost") or {}).get("n_estimators", 100))
+        return max(5, min(int(n_features) + 8, 45))
     if method == "Prophet":
         return 10
     if method == "FBLiR":
@@ -2053,6 +2056,50 @@ def _aic_bic_from_fit(y_true, fitted, k):
     aic = n * np.log(sigma2) + 2 * k
     bic = n * np.log(sigma2) + k * np.log(n)
     return float(aic), float(bic)
+
+
+def _iwfr_forecast_run_signature(
+    bounds,
+    start_date,
+    end_date,
+    forecast_target,
+    selected_features,
+    forecast_methods,
+    forecast_horizon,
+    target_smoothing_method,
+    target_smoothing_window,
+    log_transform_target,
+    model_params,
+    gdf_aoi,
+):
+    """Stable hash so we skip refitting when only lightweight widgets (e.g. heatmap date) change."""
+    mp = json.dumps(model_params or {}, sort_keys=True, default=str)
+    try:
+        dmin = pd.Timestamp(gdf_aoi["date"].min())
+        dmax = pd.Timestamp(gdf_aoi["date"].max())
+        nx = float(np.nansum(gdf_aoi.geometry.x.values))
+        ny = float(np.nansum(gdf_aoi.geometry.y.values))
+    except Exception:
+        dmin, dmax, nx, ny = ("", "", 0.0, 0.0)
+    tup = (
+        tuple(bounds) if bounds is not None else (),
+        str(start_date),
+        str(end_date),
+        str(forecast_target),
+        tuple(sorted(selected_features or [])),
+        tuple(sorted(forecast_methods or [])),
+        int(forecast_horizon),
+        str(target_smoothing_method),
+        int(target_smoothing_window),
+        bool(log_transform_target),
+        mp,
+        int(len(gdf_aoi)),
+        str(dmin),
+        str(dmax),
+        round(nx, 4),
+        round(ny, 4),
+    )
+    return hashlib.sha256(repr(tup).encode("utf-8")).hexdigest()
 
 
 def _plotly_to_png_bytes(fig):
@@ -3538,8 +3585,6 @@ if not st.session_state.show_selection_map and processed_bounds:
 
             if not gdf_aoi.empty:
                 if forecast_mode and selected_features:
-                    st.info("🔮 Generating forecast... This may take a moment.")
-                                    
                     # Prepare data for forecasting
                     daily_avg = gdf_aoi.groupby('date').agg({
                         forecast_target: 'mean',
@@ -3568,108 +3613,167 @@ if not st.session_state.show_selection_map and processed_bounds:
                     if len(daily_avg) < 30:
                         st.error("⚠️ Insufficient historical data. Need at least 30 days.")
                     else:
-                        # FIXED: Prepare features with better NaN handling
-                        df_ml, feature_names = prepare_ml_features(
-                            daily_avg_model,
+                        run_sig = _iwfr_forecast_run_signature(
+                            bounds,
+                            start_date,
+                            end_date,
                             forecast_target,
                             selected_features,
-                            lag_days=7
+                            forecast_methods,
+                            forecast_horizon,
+                            target_smoothing_method,
+                            target_smoothing_window,
+                            log_transform_target,
+                            model_params,
+                            gdf_aoi,
                         )
-                                        
-                        if len(df_ml) < 20:
-                            st.error(f"⚠️ Not enough data after feature engineering. Got {len(df_ml)} rows, need at least 20.")
-                            st.info("💡 Try: (1) Using fewer features, (2) Longer historical period, or (3) Different forecast target")
+                        fc_cached = st.session_state.get("_iwfr_fc")
+                        use_cached_fc = (
+                            fc_cached is not None
+                            and fc_cached.get("sig") == run_sig
+                            and fc_cached.get("forecast_results")
+                        )
+
+                        forecast_results = {}
+                        forecast_results_display = {}
+
+                        if use_cached_fc:
+                            daily_avg = fc_cached["daily_avg"]
+                            daily_avg_model = fc_cached["daily_avg_model"]
+                            df_ml = fc_cached["df_ml"]
+                            feature_names = fc_cached["feature_names"]
+                            X_scaled = fc_cached["X_scaled"]
+                            y = fc_cached["y"]
+                            scaler = fc_cached["scaler"]
+                            future_dates = fc_cached["future_dates"]
+                            forecast_results = fc_cached["forecast_results"]
+                            forecast_results_display = fc_cached["forecast_results_display"]
+                            st.session_state.forecast_insights_md = fc_cached.get("forecast_insights_md")
                         else:
-                            X = df_ml[feature_names]
-                            y = df_ml[forecast_target]
-                                            
-                            scaler = StandardScaler()
-                            X_scaled = pd.DataFrame(
-                                scaler.fit_transform(X),
-                                columns=X.columns,
-                                index=X.index
+                            st.info("🔮 Generating forecast... This may take a moment.")
+                            df_ml, feature_names = prepare_ml_features(
+                                daily_avg_model,
+                                forecast_target,
+                                selected_features,
+                                lag_days=7
                             )
-                                            
-                            # Generate future dates
-                            last_date = daily_avg['date'].max()
-                            future_dates = pd.date_range(
-                                start=last_date + timedelta(days=1),
-                                periods=forecast_horizon,
-                                freq='D'
-                            )
-                                            
-                            # Create future features iteratively
-                            st.session_state.forecast_insights_md = None
-                            forecast_results = {}
-    
-                            for method in forecast_methods:
-                                if method == "Ensemble":
-                                    continue
-    
-                                try:
-                                    if method == "Prophet":
-                                        df_prophet = daily_avg_model[['date', forecast_target]].copy()
-                                        df_prophet.columns = ['ds', 'y']
-                                        predictions = train_prophet(df_prophet, forecast_horizon, model_params.get('Prophet'))
-    
-                                    elif method == "LLM Forecaster":
-                                        predictions = train_llm_horizon_forecast(
-                                            daily_avg_model,
-                                            forecast_target,
-                                            forecast_horizon,
-                                            future_dates,
-                                            model_params.get("LLM Forecaster"),
-                                        )
-    
-                                    else:
-                                        fblir_status = None
-                                        if method == "FBLiR":
-                                            fblir_status = st.empty()
-                                            fblir_status.info("🔄 FBLiR is training (single fit for the full horizon)...")
-                                        try:
-                                            predictions = run_iterative_ml_forecast(
-                                                method,
-                                                X_scaled,
-                                                y,
-                                                feature_names,
-                                                df_ml,
-                                                selected_features,
-                                                forecast_target,
-                                                forecast_horizon,
-                                                scaler,
-                                                model_params,
-                                            )
-                                        finally:
-                                            if fblir_status is not None:
-                                                fblir_status.success("✅ FBLiR completed.")
-                                                time.sleep(0.25)
-                                                fblir_status.empty()
 
-                                    forecast_results[method] = predictions
-    
-                                except Exception as e:
-                                    st.warning(f"⚠️ {method} failed: {str(e)}")
-    
-                            # Calculate ensemble if requested
-                            if "Ensemble" in forecast_methods and len(forecast_results) > 0:
-                                ensemble_pred = np.mean(list(forecast_results.values()), axis=0)
-                                forecast_results["Ensemble"] = ensemble_pred
-
-                            forecast_results_display = {
-                                m: _inverse_target_transform_predictions(pred, log_transform_target)
-                                for m, pred in forecast_results.items()
-                            }
-
-                            if forecast_results:
-                                st.session_state.forecast_insights_md = generate_forecast_insights_markdown(
-                                    forecast_results_display,
-                                    daily_avg,
-                                    forecast_target,
-                                    future_dates,
+                            if len(df_ml) < 20:
+                                st.error(
+                                    f"⚠️ Not enough data after feature engineering. Got {len(df_ml)} rows, need at least 20."
+                                )
+                                st.info(
+                                    "💡 Try: (1) Using fewer features, (2) Longer historical period, "
+                                    "or (3) Different forecast target"
                                 )
                             else:
+                                X = df_ml[feature_names]
+                                y = df_ml[forecast_target]
+
+                                scaler = StandardScaler()
+                                X_scaled = pd.DataFrame(
+                                    scaler.fit_transform(X),
+                                    columns=X.columns,
+                                    index=X.index
+                                )
+
+                                last_date = daily_avg["date"].max()
+                                future_dates = pd.date_range(
+                                    start=last_date + timedelta(days=1),
+                                    periods=forecast_horizon,
+                                    freq="D",
+                                )
+
                                 st.session_state.forecast_insights_md = None
-                                            
+                                forecast_results = {}
+
+                                for method in forecast_methods:
+                                    if method == "Ensemble":
+                                        continue
+
+                                    try:
+                                        if method == "Prophet":
+                                            df_prophet = daily_avg_model[["date", forecast_target]].copy()
+                                            df_prophet.columns = ["ds", "y"]
+                                            predictions = train_prophet(
+                                                df_prophet, forecast_horizon, model_params.get("Prophet")
+                                            )
+
+                                        elif method == "LLM Forecaster":
+                                            predictions = train_llm_horizon_forecast(
+                                                daily_avg_model,
+                                                forecast_target,
+                                                forecast_horizon,
+                                                future_dates,
+                                                model_params.get("LLM Forecaster"),
+                                            )
+
+                                        else:
+                                            fblir_status = None
+                                            if method == "FBLiR":
+                                                fblir_status = st.empty()
+                                                fblir_status.info(
+                                                    "🔄 FBLiR is training (single fit for the full horizon)..."
+                                                )
+                                            try:
+                                                predictions = run_iterative_ml_forecast(
+                                                    method,
+                                                    X_scaled,
+                                                    y,
+                                                    feature_names,
+                                                    df_ml,
+                                                    selected_features,
+                                                    forecast_target,
+                                                    forecast_horizon,
+                                                    scaler,
+                                                    model_params,
+                                                )
+                                            finally:
+                                                if fblir_status is not None:
+                                                    fblir_status.success("✅ FBLiR completed.")
+                                                    time.sleep(0.25)
+                                                    fblir_status.empty()
+
+                                        forecast_results[method] = predictions
+
+                                    except Exception as e:
+                                        st.warning(f"⚠️ {method} failed: {str(e)}")
+
+                                if "Ensemble" in forecast_methods and len(forecast_results) > 0:
+                                    ensemble_pred = np.mean(list(forecast_results.values()), axis=0)
+                                    forecast_results["Ensemble"] = ensemble_pred
+
+                                forecast_results_display = {
+                                    m: _inverse_target_transform_predictions(pred, log_transform_target)
+                                    for m, pred in forecast_results.items()
+                                }
+
+                                if forecast_results:
+                                    st.session_state.forecast_insights_md = generate_forecast_insights_markdown(
+                                        forecast_results_display,
+                                        daily_avg,
+                                        forecast_target,
+                                        future_dates,
+                                    )
+                                else:
+                                    st.session_state.forecast_insights_md = None
+
+                                if forecast_results:
+                                    st.session_state["_iwfr_fc"] = {
+                                        "sig": run_sig,
+                                        "daily_avg": daily_avg,
+                                        "daily_avg_model": daily_avg_model,
+                                        "df_ml": df_ml,
+                                        "feature_names": feature_names,
+                                        "X_scaled": X_scaled,
+                                        "y": y,
+                                        "scaler": scaler,
+                                        "future_dates": future_dates,
+                                        "forecast_results": forecast_results,
+                                        "forecast_results_display": forecast_results_display,
+                                        "forecast_insights_md": st.session_state.get("forecast_insights_md"),
+                                    }
+
                             if forecast_results:
                                 # Display forecast visualization in spatial_placeholder (col_map)
                                 with spatial_placeholder.container():
@@ -3912,6 +4016,10 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                 "error": "No base-model fitted values available for ensemble residual diagnostics."
                                             }
 
+                                    st.info(
+                                        "Please note, modelling diagnostics (and therefore forecasting behaviour) can vary "
+                                        "depending on area and date range selected, because these inputs affect training data."
+                                    )
                                     st.subheader("Residual diagnostics")
                                     st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
                                     tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
@@ -3946,6 +4054,14 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     else:
                                         st.info("Residual diagnostics unavailable for the selected models.")
 
+                                    st.caption(
+                                        "**AIC (train) / BIC (train):** in-sample training fit only, on the **model fitting scale** "
+                                        "(e.g. log(1+y) if log transform is on). They do **not** score multi-step forecast "
+                                        "accuracy. A rough complexity penalty is applied; tree methods use a **capped** "
+                                        "effective-parameter proxy so the table is less skewed than when using tree counts "
+                                        "literally. **Do not read “more negative = better forecast”** from this row—use the "
+                                        "forecast plot and out-of-sample judgment for that."
+                                    )
                                     summary_rows_fc = []
                                     if len(y_hist):
                                         summary_rows_fc.append({
@@ -3954,8 +4070,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                             "Min": float(y_hist.min()),
                                             "Max": float(y_hist.max()),
                                             "Std": float(y_hist.std()),
-                                            "AIC": np.nan,
-                                            "BIC": np.nan,
+                                            "AIC (train)": np.nan,
+                                            "BIC (train)": np.nan,
                                         })
                                     for method, predictions in forecast_results_display.items():
                                         arr = np.asarray(predictions, dtype=float)
@@ -3976,8 +4092,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                             "Min": float(np.min(arr)),
                                             "Max": float(np.max(arr)),
                                             "Std": float(np.std(arr)),
-                                            "AIC": aic_val,
-                                            "BIC": bic_val,
+                                            "AIC (train)": aic_val,
+                                            "BIC (train)": bic_val,
                                         })
                                     st.subheader("Summary statistics")
                                     st.dataframe(
