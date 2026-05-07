@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 
 import streamlit.components.v1 as components
-from sklearn.linear_model import LinearRegression, Ridge, BayesianRidge
+from sklearn.linear_model import ARDRegression, LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -1862,17 +1862,26 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Bayesian Linear Regression":
+        # BayesianRidge often collapses to ~intercept-only fits when lags + calendar features are
+        # highly correlated. ARD regression keeps a Bayesian linear model but with per-feature scales.
+        # A modest Ridge blend restores seasonal structure in fitted values (matches iterative path).
         mp = model_params.get("Bayesian Linear Regression") or {}
-        m = BayesianRidge(
+        m = ARDRegression(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
             lambda_1=float(mp.get("lambda_1", 1e-6)),
             lambda_2=float(mp.get("lambda_2", 1e-6)),
-            max_iter=500,
+            max_iter=700,
             tol=1e-4,
+            threshold_lambda=1e12,
         )
         m.fit(X_scaled, y_arr)
-        return np.asarray(m.predict(X_scaled), dtype=float)
+        ridge_stab = Ridge(alpha=1.5, random_state=42)
+        ridge_stab.fit(X_scaled, y_arr)
+        blend = 0.26
+        p_ard = np.asarray(m.predict(X_scaled), dtype=float)
+        p_r = np.asarray(ridge_stab.predict(X_scaled), dtype=float)
+        return (1.0 - blend) * p_ard + blend * p_r
     if method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
         m = RandomForestRegressor(
@@ -2395,18 +2404,24 @@ def run_iterative_ml_forecast(
 
     elif method == "Bayesian Linear Regression":
         mp = model_params.get("Bayesian Linear Regression") or {}
-        model = BayesianRidge(
+        model = ARDRegression(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
             lambda_1=float(mp.get("lambda_1", 1e-6)),
             lambda_2=float(mp.get("lambda_2", 1e-6)),
-            max_iter=500,
+            max_iter=700,
             tol=1e-4,
+            threshold_lambda=1e12,
         )
         model.fit(X_scaled, y)
+        ridge_stab = Ridge(alpha=1.5, random_state=42)
+        ridge_stab.fit(X_scaled, y)
+        _blr_blend = 0.26
 
         def predict_one(row_scaled_df):
-            return float(model.predict(row_scaled_df)[0])
+            pa = float(model.predict(row_scaled_df)[0])
+            pr = float(ridge_stab.predict(row_scaled_df)[0])
+            return float((1.0 - _blr_blend) * pa + _blr_blend * pr)
 
     elif method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
@@ -2501,8 +2516,8 @@ def run_iterative_ml_forecast(
         if method in ("Linear Regression", "Bayesian Linear Regression"):
             tail_z = current_data[forecast_target].tail(21)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            # Anchor blend tames recursive drift; BayesianRidge gets a lighter blend (it already shrinks coefficients).
-            mix = 0.14 if method == "Linear Regression" else 0.07
+            # Anchor blend tames recursive drift; Bayesian linear uses a lighter mix (ARD + Ridge blend already stabilizes).
+            mix = 0.14 if method == "Linear Regression" else 0.045
             pred = (1.0 - mix) * pred + mix * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         predictions.append(pred)
