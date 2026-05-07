@@ -20,8 +20,7 @@ import re
 from pathlib import Path
 
 import streamlit.components.v1 as components
-from sklearn.linear_model import LinearRegression
-from sklearn.linear_model import BayesianRidge
+from sklearn.linear_model import LinearRegression, Ridge, BayesianRidge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -1858,7 +1857,8 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
     """Compute fitted (in-sample) predictions for residual diagnostics."""
     y_arr = np.asarray(y, dtype=float)
     if method == "Linear Regression":
-        m = LinearRegression()
+        # Ridge on standardized features; aligns with iterative forecast path.
+        m = Ridge(alpha=1.5, random_state=42)
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Bayesian Linear Regression":
@@ -1866,8 +1866,8 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m = BayesianRidge(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=float(mp.get("lambda_1", 1e-6)),
-            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            lambda_1=max(float(mp.get("lambda_1", 1e-6)), 1e-5),
+            lambda_2=max(float(mp.get("lambda_2", 1e-6)), 1e-5),
         )
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
@@ -2384,7 +2384,8 @@ def run_iterative_ml_forecast(
     linear_z_hi = train_z_max + linear_recursive_margin
 
     if method == "Linear Regression":
-        model = LinearRegression()
+        # L2 shrinkage reduces coefficient blow-ups in recursive multi-step forecasts.
+        model = Ridge(alpha=1.5, random_state=42)
         model.fit(X_scaled, y)
 
         def predict_one(row_scaled_df):
@@ -2395,8 +2396,8 @@ def run_iterative_ml_forecast(
         model = BayesianRidge(
             alpha_1=float(mp.get("alpha_1", 1e-6)),
             alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=float(mp.get("lambda_1", 1e-6)),
-            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            lambda_1=max(float(mp.get("lambda_1", 1e-6)), 1e-5),
+            lambda_2=max(float(mp.get("lambda_2", 1e-6)), 1e-5),
         )
         model.fit(X_scaled, y)
 
@@ -2494,6 +2495,10 @@ def run_iterative_ml_forecast(
         )
         pred = predict_one(last_row_scaled)
         if method in ("Linear Regression", "Bayesian Linear Regression"):
+            tail_z = current_data[forecast_target].tail(21)
+            anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
+            # Pull each step toward recent local level to tame recursive drift (esp. under log1p + expm1).
+            pred = (1.0 - 0.14) * pred + 0.14 * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         predictions.append(pred)
 
@@ -3774,359 +3779,359 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         "forecast_insights_md": st.session_state.get("forecast_insights_md"),
                                     }
 
-                            if forecast_results:
-                                # Display forecast visualization in spatial_placeholder (col_map)
-                                with spatial_placeholder.container():
-                                    plain_summary = _simple_forecast_findings_summary(
-                                        forecast_results_display,
-                                        daily_avg[forecast_target].astype(float).values,
-                                        forecast_target,
-                                        future_dates,
-                                    )
-                                    _ins = st.session_state.get("forecast_insights_md")
-                                    if _ins:
-                                        st.subheader("💡 Useful insights")
-                                        if plain_summary:
-                                            st.info(plain_summary)
-                                        st.markdown(_ins)
-                                        st.markdown("---")
-                                    y_hist = daily_avg[forecast_target].dropna().astype(float)
-                                    acf_fig_fc = None
-                                    if len(y_hist) > 14:
-                                        acf_fig_fc = _acf_plotly(
-                                            y_hist.values,
-                                            title=f"ACF — {forecast_target} (historical AOI daily mean)",
-                                            max_lag=min(40, max(5, len(y_hist) // 3)),
-                                        )
-                                    metric_description_hist = AVAILABLE_PARAMETERS.get(
-                                        forecast_target,
-                                        "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
-                                    )
-
-                                    row1c1, row1c2 = st.columns(2, gap="large")
-                                    with row1c1:
-                                        st.subheader("Forecast time series")
-                                        fig = go.Figure()
-                                        fig.add_trace(go.Scatter(
-                                            x=daily_avg['date'],
-                                            y=daily_avg[forecast_target],
-                                            mode='lines',
-                                            name='Historical',
-                                            line=dict(color='blue', width=2),
-                                        ))
-                                        colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan']
-                                        for idx, (method, predictions) in enumerate(forecast_results_display.items()):
-                                            fig.add_trace(go.Scatter(
-                                                x=future_dates,
-                                                y=predictions,
-                                                mode='lines',
-                                                name=f'{method} forecast',
-                                                line=dict(color=colors[idx % len(colors)], width=2, dash='dash'),
-                                            ))
-                                        fig.update_layout(
-                                            title=f"{forecast_target} — historical + forecasts",
-                                            xaxis_title="Date",
-                                            yaxis_title=AVAILABLE_PARAMETERS.get(forecast_target, forecast_target),
-                                            height=480,
-                                            margin=dict(t=50, b=40),
-                                            hovermode='x unified',
-                                        )
-                                        st.plotly_chart(fig, use_container_width=True, theme=None)
-
-                                    with row1c2:
-                                        mask_aoi = (
-                                            (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
-                                            (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
-                                        )
-                                        gdf_spatial_data = gdf_filtered[mask_aoi]
-                                        if not gdf_spatial_data.empty:
-                                            valid_data = gdf_spatial_data[gdf_spatial_data[forecast_target].notna()]
-                                            if not valid_data.empty:
-                                                vf = valid_data.copy()
-                                                vf["_dts"] = pd.to_datetime(vf["date"])
-                                                sd_hist = pd.Timestamp(start_date)
-                                                ed_hist = pd.Timestamp(end_date)
-                                                in_rng = (vf["_dts"] >= sd_hist) & (vf["_dts"] <= ed_hist)
-                                                avail_map_dates = sorted(vf.loc[in_rng, "date"].unique())
-                                                if not avail_map_dates:
-                                                    avail_map_dates = sorted(vf["date"].unique())
-                                                chosen_hist_date = st.selectbox(
-                                                    "Historical heatmap date",
-                                                    options=avail_map_dates,
-                                                    index=len(avail_map_dates) - 1,
-                                                    format_func=lambda x: pd.Timestamp(x).strftime("%Y-%m-%d"),
-                                                    key="forecast_spatial_hist_date",
-                                                    help=(
-                                                        "Pick any AOI coverage date inside your sidebar historical window "
-                                                        f"({start_date} to {end_date})."
-                                                    ),
-                                                )
-                                                st.subheader("Spatial — historical heatmap")
-                                                gdf_latest = valid_data[valid_data["date"] == chosen_hist_date]
-                                                hist_std = float(y_hist.std()) if len(y_hist) > 1 else 0.0
-                                                if not np.isfinite(hist_std):
-                                                    hist_std = 0.0
-                                                values_grid, heatmap_values = create_heatmap_data(
-                                                    gdf_latest,
-                                                    bounds,
-                                                    forecast_target,
-                                                    reference_std=hist_std,
-                                                    land_geom_aoi=land_mask_geom_for_aoi,
-                                                )
-                                                if values_grid is not None and heatmap_values and len(heatmap_values) > 0:
-                                                    if map_type == "Detailed":
-                                                        m_forecast_spatial = folium.Map(
-                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                            zoom_start=map_zoom_level
-                                                        )
-                                                        folium.TileLayer(
-                                                            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                                                            attr='Esri',
-                                                            name='Esri Satellite'
-                                                        ).add_to(m_forecast_spatial)
-                                                        folium.TileLayer(
-                                                            tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-                                                            attr='Esri',
-                                                            name='Labels',
-                                                            overlay=True
-                                                        ).add_to(m_forecast_spatial)
-                                                    elif map_type == "Terrain":
-                                                        m_forecast_spatial = folium.Map(
-                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                            zoom_start=map_zoom_level,
-                                                            tiles="OpenStreetMap"
-                                                        )
-                                                    else:
-                                                        m_forecast_spatial = folium.Map(
-                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
-                                                            zoom_start=map_zoom_level,
-                                                            tiles="CartoDB positron"
-                                                        )
-                                                    folium.Rectangle(
-                                                        bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
-                                                        color="red",
-                                                        weight=2,
-                                                        fill_opacity=0.0,
-                                                        popup=f"Historical: {chosen_hist_date.strftime('%Y-%m-%d')}"
-                                                    ).add_to(m_forecast_spatial)
-                                                    heatmap_layer, legend_html = create_continuous_heatmap(
-                                                        bounds, values_grid,
-                                                        opacity=heatmap_opacity,
-                                                        metric_name=f"{metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}",
-                                                        color_scheme="red",
-                                                    )
-                                                    heatmap_layer.add_to(m_forecast_spatial)
-                                                    m_forecast_spatial.get_root().html.add_child(folium.Element(legend_html))
-                                                    st_folium(
-                                                        m_forecast_spatial,
-                                                        key=f"forecast_timeseries_spatial_map_{chosen_hist_date}",
-                                                        width=VIZ_FOLIUM_CELL_W,
-                                                        height=VIZ_FOLIUM_CELL_H,
-                                                        returned_objects=[],
-                                                    )
-                                                    vmin_ext = float(np.nanmin(values_grid))
-                                                    vmax_ext = float(np.nanmax(values_grid))
-                                                    vrange_ext = vmax_ext - vmin_ext
-                                                    st.markdown(
-                                                        f"""
-                                                        <div style="margin-top:6px;padding:8px 10px;border:1px solid #fecaca;border-radius:8px;background:#ffffff;">
-                                                          <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
-                                                            {metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}
-                                                          </div>
-                                                          <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#FFF8F8,#FFCDD2,#E57373,#E53935,#C62828,#7F0000);"></div>
-                                                          <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
-                                                            <span>Min: {vmin_ext:.2f}</span>
-                                                            <span>Max: {vmax_ext:.2f}</span>
-                                                            <span>Range: {vrange_ext:.2f}</span>
-                                                          </div>
-                                                        </div>
-                                                        """,
-                                                        unsafe_allow_html=True,
-                                                    )
-                                                    st.caption(f"{chosen_hist_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points")
-                                                else:
-                                                    st.info("Insufficient spatial points for this date.")
-                                            else:
-                                                st.info(f"No valid {forecast_target} in AOI for mapping.")
-                                        else:
-                                            st.info("No spatial data in AOI.")
-
-                                    row2c1, row2c2 = st.columns(2, gap="large")
-                                    with row2c1:
-                                        st.subheader("Historical ACF")
-                                        if acf_fig_fc is not None:
-                                            st.plotly_chart(acf_fig_fc, use_container_width=True, theme=None)
-                                        else:
-                                            st.info("Not enough historical points for ACF (need more than 14 days).")
-                                    with row2c2:
-                                        st.subheader("Historical distribution")
-                                        dist_fig_fc = create_distribution_plot(
-                                            y_hist.tolist(), forecast_target, metric_description_hist
-                                        )
-                                        if dist_fig_fc:
-                                            dist_fig_fc.update_layout(
-                                                title=f"{forecast_target} — AOI daily mean",
-                                                height=420,
-                                                margin=dict(t=50, b=40),
-                                            )
-                                            st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
-                                        else:
-                                            st.info("No distribution to show.")
-
-                                    # Residual diagnostics (before summary table)
-                                    residual_diagnostics = {}
-                                    fitted_by_method = {}
-                                    y_true_diag = np.asarray(y, dtype=float)
-                                    for method in forecast_results.keys():
-                                        if method == "Ensemble":
-                                            continue
-                                        try:
-                                            fitted = _fit_in_sample_predictions(
-                                                method,
-                                                X_scaled,
-                                                y_true_diag,
-                                                df_ml,
-                                                forecast_target,
-                                                model_params,
-                                            )
-                                            if fitted is None:
-                                                residual_diagnostics[method] = {
-                                                    "error": "Residual diagnostics unavailable for this model."
-                                                }
-                                            else:
-                                                fitted = np.asarray(fitted, dtype=float).ravel()
-                                                fitted_by_method[method] = fitted
-                                                residual_diagnostics[method] = _residual_diagnostic_bundle(
-                                                    y_true_diag, fitted, method
-                                                )
-                                        except Exception as diag_e:
-                                            residual_diagnostics[method] = {"error": str(diag_e)}
-
-                                    if "Ensemble" in forecast_results:
-                                        available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
-                                        available = [np.asarray(a, dtype=float) for a in available if a is not None]
-                                        if available:
-                                            ens_fit = np.mean(np.vstack(available), axis=0)
-                                            fitted_by_method["Ensemble"] = ens_fit
-                                            residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
-                                                y_true_diag, ens_fit, "Ensemble"
-                                            )
-                                        else:
-                                            residual_diagnostics["Ensemble"] = {
-                                                "error": "No base-model fitted values available for ensemble residual diagnostics."
-                                            }
-
-                                    st.info(
-                                        "Please note, modelling diagnostics (and therefore forecasting behaviour) can vary "
-                                        "depending on area and date range selected, because these inputs affect training data."
-                                    )
-                                    st.subheader("Residual diagnostics")
-                                    st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
-                                    tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
-                                    if tab_names:
-                                        diag_tabs = st.tabs(tab_names)
-                                        for t_i, m_name in enumerate(tab_names):
-                                            with diag_tabs[t_i]:
-                                                d = residual_diagnostics[m_name]
-                                                if "error" in d:
-                                                    st.warning(d["error"])
-                                                else:
-                                                    st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
-                                                    r1, r2 = st.columns(2)
-                                                    with r1:
-                                                        st.plotly_chart(d["qq_fig"], use_container_width=True, theme=None)
-                                                    with r2:
-                                                        st.plotly_chart(d["resid_fig"], use_container_width=True, theme=None)
-                                                    r3, r4 = st.columns(2)
-                                                    with r3:
-                                                        st.plotly_chart(d["acf_fig"], use_container_width=True, theme=None)
-                                                    with r4:
-                                                        residual_ts_fig = go.Figure()
-                                                        residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
-                                                        residual_ts_fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                                                        residual_ts_fig.update_layout(
-                                                            title=f"Residual time series — {m_name}",
-                                                            xaxis_title="Index",
-                                                            yaxis_title="Residual",
-                                                            height=300,
-                                                        )
-                                                        st.plotly_chart(residual_ts_fig, use_container_width=True, theme=None)
-                                    else:
-                                        st.info("Residual diagnostics unavailable for the selected models.")
-
-                                    st.caption(
-                                        "**AIC (train) / BIC (train):** in-sample training fit only, on the **model fitting scale** "
-                                        "(e.g. log(1+y) if log transform is on). They do **not** score multi-step forecast "
-                                        "accuracy. A rough complexity penalty is applied; tree methods use a **capped** "
-                                        "effective-parameter proxy so the table is less skewed than when using tree counts "
-                                        "literally. **Do not read “more negative = better forecast”** from this row—use the "
-                                        "forecast plot and out-of-sample judgment for that."
-                                    )
-                                    summary_rows_fc = []
-                                    if len(y_hist):
-                                        summary_rows_fc.append({
-                                            "Series": "Historical (AOI daily mean)",
-                                            "Mean": float(y_hist.mean()),
-                                            "Min": float(y_hist.min()),
-                                            "Max": float(y_hist.max()),
-                                            "Std": float(y_hist.std()),
-                                            "AIC (train)": np.nan,
-                                            "BIC (train)": np.nan,
-                                        })
-                                    for method, predictions in forecast_results_display.items():
-                                        arr = np.asarray(predictions, dtype=float)
-                                        fit_arr = fitted_by_method.get(method)
-                                        k_eff = _estimate_effective_k(
-                                            method,
-                                            model_params,
-                                            n_features=len(feature_names),
-                                            n_selected_methods=max(1, len([m for m in forecast_results.keys() if m != "Ensemble"])),
-                                        )
-                                        if fit_arr is not None:
-                                            aic_val, bic_val = _aic_bic_from_fit(y_true_diag, fit_arr, k_eff)
-                                        else:
-                                            aic_val, bic_val = (np.nan, np.nan)
-                                        summary_rows_fc.append({
-                                            "Series": f"Forecast — {method}",
-                                            "Mean": float(np.mean(arr)),
-                                            "Min": float(np.min(arr)),
-                                            "Max": float(np.max(arr)),
-                                            "Std": float(np.std(arr)),
-                                            "AIC (train)": aic_val,
-                                            "BIC (train)": bic_val,
-                                        })
-                                    st.subheader("Summary statistics")
-                                    st.dataframe(
-                                        pd.DataFrame(summary_rows_fc).round(3),
-                                        use_container_width=True,
-                                        hide_index=True,
-                                    )
-                                    st.session_state.forecast_report_payload = {
-                                        "plain_summary": plain_summary,
-                                        "insights_md": _ins,
-                                        "summary_rows": summary_rows_fc,
-                                        "forecast_fig": fig,
-                                        "spatial_fig": _spatial_grid_plotly(
-                                            values_grid if "values_grid" in locals() else None,
-                                            bounds,
-                                            "Spatial heatmap (historical snapshot)",
-                                            colorscale="Reds",
-                                        ) if "values_grid" in locals() and values_grid is not None else None,
-                                        "hist_acf_fig": acf_fig_fc,
-                                        "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
-                                        "residual_diagnostics": residual_diagnostics,
-                                    }
-                                # Prepare export data (wide: date, features, target, forecast_*, row_type)
-                                st.session_state.combined_export_data = build_forecast_export_wide(
-                                    daily_avg,
-                                    selected_features,
+                        if forecast_results:
+                            # Display forecast visualization in spatial_placeholder (col_map)
+                            with spatial_placeholder.container():
+                                plain_summary = _simple_forecast_findings_summary(
+                                    forecast_results_display,
+                                    daily_avg[forecast_target].astype(float).values,
                                     forecast_target,
                                     future_dates,
-                                    forecast_results_display,
+                                )
+                                _ins = st.session_state.get("forecast_insights_md")
+                                if _ins:
+                                    st.subheader("💡 Useful insights")
+                                    if plain_summary:
+                                        st.info(plain_summary)
+                                    st.markdown(_ins)
+                                    st.markdown("---")
+                                y_hist = daily_avg[forecast_target].dropna().astype(float)
+                                acf_fig_fc = None
+                                if len(y_hist) > 14:
+                                    acf_fig_fc = _acf_plotly(
+                                        y_hist.values,
+                                        title=f"ACF — {forecast_target} (historical AOI daily mean)",
+                                        max_lag=min(40, max(5, len(y_hist) // 3)),
+                                    )
+                                metric_description_hist = AVAILABLE_PARAMETERS.get(
+                                    forecast_target,
+                                    "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
                                 )
 
-                            else:
-                                st.error("❌ All forecast methods failed")
+                                row1c1, row1c2 = st.columns(2, gap="large")
+                                with row1c1:
+                                    st.subheader("Forecast time series")
+                                    fig = go.Figure()
+                                    fig.add_trace(go.Scatter(
+                                        x=daily_avg['date'],
+                                        y=daily_avg[forecast_target],
+                                        mode='lines',
+                                        name='Historical',
+                                        line=dict(color='blue', width=2),
+                                    ))
+                                    colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'cyan']
+                                    for idx, (method, predictions) in enumerate(forecast_results_display.items()):
+                                        fig.add_trace(go.Scatter(
+                                            x=future_dates,
+                                            y=predictions,
+                                            mode='lines',
+                                            name=f'{method} forecast',
+                                            line=dict(color=colors[idx % len(colors)], width=2, dash='dash'),
+                                        ))
+                                    fig.update_layout(
+                                        title=f"{forecast_target} — historical + forecasts",
+                                        xaxis_title="Date",
+                                        yaxis_title=AVAILABLE_PARAMETERS.get(forecast_target, forecast_target),
+                                        height=480,
+                                        margin=dict(t=50, b=40),
+                                        hovermode='x unified',
+                                    )
+                                    st.plotly_chart(fig, use_container_width=True, theme=None)
+
+                                with row1c2:
+                                    mask_aoi = (
+                                        (gdf_filtered.geometry.x >= bounds[0]) & (gdf_filtered.geometry.x <= bounds[2]) &
+                                        (gdf_filtered.geometry.y >= bounds[1]) & (gdf_filtered.geometry.y <= bounds[3])
+                                    )
+                                    gdf_spatial_data = gdf_filtered[mask_aoi]
+                                    if not gdf_spatial_data.empty:
+                                        valid_data = gdf_spatial_data[gdf_spatial_data[forecast_target].notna()]
+                                        if not valid_data.empty:
+                                            vf = valid_data.copy()
+                                            vf["_dts"] = pd.to_datetime(vf["date"])
+                                            sd_hist = pd.Timestamp(start_date)
+                                            ed_hist = pd.Timestamp(end_date)
+                                            in_rng = (vf["_dts"] >= sd_hist) & (vf["_dts"] <= ed_hist)
+                                            avail_map_dates = sorted(vf.loc[in_rng, "date"].unique())
+                                            if not avail_map_dates:
+                                                avail_map_dates = sorted(vf["date"].unique())
+                                            chosen_hist_date = st.selectbox(
+                                                "Historical heatmap date",
+                                                options=avail_map_dates,
+                                                index=len(avail_map_dates) - 1,
+                                                format_func=lambda x: pd.Timestamp(x).strftime("%Y-%m-%d"),
+                                                key="forecast_spatial_hist_date",
+                                                help=(
+                                                    "Pick any AOI coverage date inside your sidebar historical window "
+                                                    f"({start_date} to {end_date})."
+                                                ),
+                                            )
+                                            st.subheader("Spatial — historical heatmap")
+                                            gdf_latest = valid_data[valid_data["date"] == chosen_hist_date]
+                                            hist_std = float(y_hist.std()) if len(y_hist) > 1 else 0.0
+                                            if not np.isfinite(hist_std):
+                                                hist_std = 0.0
+                                            values_grid, heatmap_values = create_heatmap_data(
+                                                gdf_latest,
+                                                bounds,
+                                                forecast_target,
+                                                reference_std=hist_std,
+                                                land_geom_aoi=land_mask_geom_for_aoi,
+                                            )
+                                            if values_grid is not None and heatmap_values and len(heatmap_values) > 0:
+                                                if map_type == "Detailed":
+                                                    m_forecast_spatial = folium.Map(
+                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                        zoom_start=map_zoom_level
+                                                    )
+                                                    folium.TileLayer(
+                                                        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                                                        attr='Esri',
+                                                        name='Esri Satellite'
+                                                    ).add_to(m_forecast_spatial)
+                                                    folium.TileLayer(
+                                                        tiles='https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+                                                        attr='Esri',
+                                                        name='Labels',
+                                                        overlay=True
+                                                    ).add_to(m_forecast_spatial)
+                                                elif map_type == "Terrain":
+                                                    m_forecast_spatial = folium.Map(
+                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                        zoom_start=map_zoom_level,
+                                                        tiles="OpenStreetMap"
+                                                    )
+                                                else:
+                                                    m_forecast_spatial = folium.Map(
+                                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                        zoom_start=map_zoom_level,
+                                                        tiles="CartoDB positron"
+                                                    )
+                                                folium.Rectangle(
+                                                    bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
+                                                    color="red",
+                                                    weight=2,
+                                                    fill_opacity=0.0,
+                                                    popup=f"Historical: {chosen_hist_date.strftime('%Y-%m-%d')}"
+                                                ).add_to(m_forecast_spatial)
+                                                heatmap_layer, legend_html = create_continuous_heatmap(
+                                                    bounds, values_grid,
+                                                    opacity=heatmap_opacity,
+                                                    metric_name=f"{metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}",
+                                                    color_scheme="red",
+                                                )
+                                                heatmap_layer.add_to(m_forecast_spatial)
+                                                m_forecast_spatial.get_root().html.add_child(folium.Element(legend_html))
+                                                st_folium(
+                                                    m_forecast_spatial,
+                                                    key=f"forecast_timeseries_spatial_map_{chosen_hist_date}",
+                                                    width=VIZ_FOLIUM_CELL_W,
+                                                    height=VIZ_FOLIUM_CELL_H,
+                                                    returned_objects=[],
+                                                )
+                                                vmin_ext = float(np.nanmin(values_grid))
+                                                vmax_ext = float(np.nanmax(values_grid))
+                                                vrange_ext = vmax_ext - vmin_ext
+                                                st.markdown(
+                                                    f"""
+                                                    <div style="margin-top:6px;padding:8px 10px;border:1px solid #fecaca;border-radius:8px;background:#ffffff;">
+                                                      <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
+                                                        {metric_description_hist} — {chosen_hist_date.strftime('%Y-%m-%d')}
+                                                      </div>
+                                                      <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#FFF8F8,#FFCDD2,#E57373,#E53935,#C62828,#7F0000);"></div>
+                                                      <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
+                                                        <span>Min: {vmin_ext:.2f}</span>
+                                                        <span>Max: {vmax_ext:.2f}</span>
+                                                        <span>Range: {vrange_ext:.2f}</span>
+                                                      </div>
+                                                    </div>
+                                                    """,
+                                                    unsafe_allow_html=True,
+                                                )
+                                                st.caption(f"{chosen_hist_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points")
+                                            else:
+                                                st.info("Insufficient spatial points for this date.")
+                                        else:
+                                            st.info(f"No valid {forecast_target} in AOI for mapping.")
+                                    else:
+                                        st.info("No spatial data in AOI.")
+
+                                row2c1, row2c2 = st.columns(2, gap="large")
+                                with row2c1:
+                                    st.subheader("Historical ACF")
+                                    if acf_fig_fc is not None:
+                                        st.plotly_chart(acf_fig_fc, use_container_width=True, theme=None)
+                                    else:
+                                        st.info("Not enough historical points for ACF (need more than 14 days).")
+                                with row2c2:
+                                    st.subheader("Historical distribution")
+                                    dist_fig_fc = create_distribution_plot(
+                                        y_hist.tolist(), forecast_target, metric_description_hist
+                                    )
+                                    if dist_fig_fc:
+                                        dist_fig_fc.update_layout(
+                                            title=f"{forecast_target} — AOI daily mean",
+                                            height=420,
+                                            margin=dict(t=50, b=40),
+                                        )
+                                        st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
+                                    else:
+                                        st.info("No distribution to show.")
+
+                                # Residual diagnostics (before summary table)
+                                residual_diagnostics = {}
+                                fitted_by_method = {}
+                                y_true_diag = np.asarray(y, dtype=float)
+                                for method in forecast_results.keys():
+                                    if method == "Ensemble":
+                                        continue
+                                    try:
+                                        fitted = _fit_in_sample_predictions(
+                                            method,
+                                            X_scaled,
+                                            y_true_diag,
+                                            df_ml,
+                                            forecast_target,
+                                            model_params,
+                                        )
+                                        if fitted is None:
+                                            residual_diagnostics[method] = {
+                                                "error": "Residual diagnostics unavailable for this model."
+                                            }
+                                        else:
+                                            fitted = np.asarray(fitted, dtype=float).ravel()
+                                            fitted_by_method[method] = fitted
+                                            residual_diagnostics[method] = _residual_diagnostic_bundle(
+                                                y_true_diag, fitted, method
+                                            )
+                                    except Exception as diag_e:
+                                        residual_diagnostics[method] = {"error": str(diag_e)}
+
+                                if "Ensemble" in forecast_results:
+                                    available = [fitted_by_method.get(m) for m in fitted_by_method if m != "Ensemble"]
+                                    available = [np.asarray(a, dtype=float) for a in available if a is not None]
+                                    if available:
+                                        ens_fit = np.mean(np.vstack(available), axis=0)
+                                        fitted_by_method["Ensemble"] = ens_fit
+                                        residual_diagnostics["Ensemble"] = _residual_diagnostic_bundle(
+                                            y_true_diag, ens_fit, "Ensemble"
+                                        )
+                                    else:
+                                        residual_diagnostics["Ensemble"] = {
+                                            "error": "No base-model fitted values available for ensemble residual diagnostics."
+                                        }
+
+                                st.info(
+                                    "Please note, modelling diagnostics (and therefore forecasting behaviour) can vary "
+                                    "depending on area and date range selected, because these inputs affect training data."
+                                )
+                                st.subheader("Residual diagnostics")
+                                st.caption("Open each model tab to inspect QQ plot, residual-vs-fitted, residual ACF, and residual time series.")
+                                tab_names = list(residual_diagnostics.keys()) if residual_diagnostics else []
+                                if tab_names:
+                                    diag_tabs = st.tabs(tab_names)
+                                    for t_i, m_name in enumerate(tab_names):
+                                        with diag_tabs[t_i]:
+                                            d = residual_diagnostics[m_name]
+                                            if "error" in d:
+                                                st.warning(d["error"])
+                                            else:
+                                                st.caption(f"Shapiro-Wilk W={d['shapiro_stat']:.4f}, p={d['shapiro_p']:.4f}")
+                                                r1, r2 = st.columns(2)
+                                                with r1:
+                                                    st.plotly_chart(d["qq_fig"], use_container_width=True, theme=None)
+                                                with r2:
+                                                    st.plotly_chart(d["resid_fig"], use_container_width=True, theme=None)
+                                                r3, r4 = st.columns(2)
+                                                with r3:
+                                                    st.plotly_chart(d["acf_fig"], use_container_width=True, theme=None)
+                                                with r4:
+                                                    residual_ts_fig = go.Figure()
+                                                    residual_ts_fig.add_trace(go.Scatter(y=d["residuals"], mode="lines+markers", name="Residuals"))
+                                                    residual_ts_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                                                    residual_ts_fig.update_layout(
+                                                        title=f"Residual time series — {m_name}",
+                                                        xaxis_title="Index",
+                                                        yaxis_title="Residual",
+                                                        height=300,
+                                                    )
+                                                    st.plotly_chart(residual_ts_fig, use_container_width=True, theme=None)
+                                else:
+                                    st.info("Residual diagnostics unavailable for the selected models.")
+
+                                st.caption(
+                                    "**AIC (train) / BIC (train):** in-sample training fit only, on the **model fitting scale** "
+                                    "(e.g. log(1+y) if log transform is on). They do **not** score multi-step forecast "
+                                    "accuracy. A rough complexity penalty is applied; tree methods use a **capped** "
+                                    "effective-parameter proxy so the table is less skewed than when using tree counts "
+                                    "literally. **Do not read “more negative = better forecast”** from this row—use the "
+                                    "forecast plot and out-of-sample judgment for that."
+                                )
+                                summary_rows_fc = []
+                                if len(y_hist):
+                                    summary_rows_fc.append({
+                                        "Series": "Historical (AOI daily mean)",
+                                        "Mean": float(y_hist.mean()),
+                                        "Min": float(y_hist.min()),
+                                        "Max": float(y_hist.max()),
+                                        "Std": float(y_hist.std()),
+                                        "AIC (train)": np.nan,
+                                        "BIC (train)": np.nan,
+                                    })
+                                for method, predictions in forecast_results_display.items():
+                                    arr = np.asarray(predictions, dtype=float)
+                                    fit_arr = fitted_by_method.get(method)
+                                    k_eff = _estimate_effective_k(
+                                        method,
+                                        model_params,
+                                        n_features=len(feature_names),
+                                        n_selected_methods=max(1, len([m for m in forecast_results.keys() if m != "Ensemble"])),
+                                    )
+                                    if fit_arr is not None:
+                                        aic_val, bic_val = _aic_bic_from_fit(y_true_diag, fit_arr, k_eff)
+                                    else:
+                                        aic_val, bic_val = (np.nan, np.nan)
+                                    summary_rows_fc.append({
+                                        "Series": f"Forecast — {method}",
+                                        "Mean": float(np.mean(arr)),
+                                        "Min": float(np.min(arr)),
+                                        "Max": float(np.max(arr)),
+                                        "Std": float(np.std(arr)),
+                                        "AIC (train)": aic_val,
+                                        "BIC (train)": bic_val,
+                                    })
+                                st.subheader("Summary statistics")
+                                st.dataframe(
+                                    pd.DataFrame(summary_rows_fc).round(3),
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
+                                st.session_state.forecast_report_payload = {
+                                    "plain_summary": plain_summary,
+                                    "insights_md": _ins,
+                                    "summary_rows": summary_rows_fc,
+                                    "forecast_fig": fig,
+                                    "spatial_fig": _spatial_grid_plotly(
+                                        values_grid if "values_grid" in locals() else None,
+                                        bounds,
+                                        "Spatial heatmap (historical snapshot)",
+                                        colorscale="Reds",
+                                    ) if "values_grid" in locals() and values_grid is not None else None,
+                                    "hist_acf_fig": acf_fig_fc,
+                                    "hist_dist_fig": dist_fig_fc if "dist_fig_fc" in locals() else None,
+                                    "residual_diagnostics": residual_diagnostics,
+                                }
+                            # Prepare export data (wide: date, features, target, forecast_*, row_type)
+                            st.session_state.combined_export_data = build_forecast_export_wide(
+                                daily_avg,
+                                selected_features,
+                                forecast_target,
+                                future_dates,
+                                forecast_results_display,
+                            )
+
+                        else:
+                            st.error("❌ All forecast methods failed")
                                 
                 else:
                     # Regular time series (no forecast)
