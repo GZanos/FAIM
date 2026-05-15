@@ -2685,7 +2685,7 @@ if data_source == "Forecasting":
         if not st.session_state.get("long_forecast_horizon_dialog_dismissed"):
             _long_forecast_horizon_dialog(forecast_horizon, LONG_FORECAST_HORIZON_WARNING_DAYS)
 
-    with st.sidebar.expander("📐 Original Series Settings", expanded=False):
+    with st.sidebar.expander("📐 Transformation & Smoothing Options", expanded=False):
         log_transform_target = st.checkbox(
             "Log-transform target (ln(1+y), pre-fit)",
             value=False,
@@ -2918,7 +2918,7 @@ Ask me anything about the app!"""
 3. Select features to use for training
 4. Choose forecast methods (Random Forest, XGBoost, FBLiR, etc.)
 5. Set forecast horizon (7-730 days)
-6. Use **Original Series Settings** for optional smoothing / log transform (fits use this; plots export original scale)
+6. Use **Transformation & Smoothing Options** for optional smoothing / log transform (fits use this; plots export original scale)
 7. Configure model parameters if needed
 8. Draw an AOI on the map — forecasting runs when viewing Spatial Distribution with Time Series
 
@@ -2975,7 +2975,7 @@ FBLiR combines Gaussian Fuzzy Numbers (GFN) and Bayesian inference for uncertain
             'patterns': ['parameter', 'model parameter', 'configure', 'settings', 'tune', 'hyperparameter'],
             'response': """⚙️ **Model Parameters Guide:**
 
-**Access:** Sidebar → **📐 Original Series Settings** (smoothing / log) and **⚙️ Configure Model Parameters**
+**Access:** Sidebar → **📐 Transformation & Smoothing Options** (smoothing / log) and **⚙️ Configure Model Parameters**
 
 **Available Models:**
 1. **Random Forest:**
@@ -4216,9 +4216,11 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 ).add_to(m_timeseries)
                                 metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
                                 heatmap_layer, legend_html = create_continuous_heatmap(
-                                    bounds, values_grid,
+                                    bounds,
+                                    values_grid,
                                     opacity=heatmap_opacity,
-                                    metric_name=metric_description
+                                    metric_name=metric_description,
+                                    color_scheme="red",
                                 )
                                 heatmap_layer.add_to(m_timeseries)
                                 m_timeseries.get_root().html.add_child(folium.Element(legend_html))
