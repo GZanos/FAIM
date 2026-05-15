@@ -4231,7 +4231,28 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     height=VIZ_FOLIUM_CELL_H,
                                     returned_objects=[],
                                 )
-                                st.caption(f"Latest date: {latest_date.strftime('%Y-%m-%d')}")
+                                vmin_ext = float(np.nanmin(values_grid))
+                                vmax_ext = float(np.nanmax(values_grid))
+                                vrange_ext = vmax_ext - vmin_ext
+                                st.markdown(
+                                    f"""
+                                    <div style="margin-top:6px;padding:8px 10px;border:1px solid #fecaca;border-radius:8px;background:#ffffff;">
+                                      <div style="font-size:12px;font-weight:700;text-align:center;margin-bottom:6px;color:#0f172a;">
+                                        {metric_description} — {latest_date.strftime('%Y-%m-%d')}
+                                      </div>
+                                      <div style="height:12px;border-radius:6px;background:linear-gradient(to right,#FFF8F8,#FFCDD2,#E57373,#E53935,#C62828,#7F0000);"></div>
+                                      <div style="display:flex;justify-content:space-between;font-size:12px;margin-top:6px;color:#111827;font-weight:700;">
+                                        <span>Min: {vmin_ext:.2f}</span>
+                                        <span>Max: {vmax_ext:.2f}</span>
+                                        <span>Range: {vrange_ext:.2f}</span>
+                                      </div>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                                st.caption(
+                                    f"{latest_date.strftime('%Y-%m-%d')} · {len(gdf_latest)} points"
+                                )
                             else:
                                 st.info("No spatial heatmap available for the latest date.")
 
