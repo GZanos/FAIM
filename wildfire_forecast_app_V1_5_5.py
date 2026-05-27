@@ -1371,7 +1371,14 @@ def _acf_series_remove_slow_variation(y, period_days=365.25, min_points=90):
     return resid, True
 
 
-def _acf_plotly(series, title="Autocorrelation", max_lag=40, adjust_slow_acf=True):
+def _acf_plotly(
+    series,
+    title="Autocorrelation",
+    max_lag=40,
+    adjust_slow_acf=True,
+    height=300,
+    margin=None,
+):
     y_raw = np.asarray(series, dtype=float)
     y_raw = y_raw[np.isfinite(y_raw)]
     adjusted = False
@@ -1401,9 +1408,10 @@ def _acf_plotly(series, title="Autocorrelation", max_lag=40, adjust_slow_acf=Tru
         title=f"{title}<br><sup style='font-size:11px'>{sub}</sup>",
         xaxis_title="Lag (days)",
         yaxis_title="ACF",
-        height=300,
+        height=int(height),
         showlegend=False,
-        margin=dict(t=60, b=40),
+        margin=margin if margin is not None else dict(t=60, b=40),
+        autosize=True,
     )
     return fig
 
@@ -3324,6 +3332,9 @@ if st.sidebar.button("🔄 Reset App", use_container_width=True, key="reset_faim
 main_viz = st.container()
 VIZ_FOLIUM_CELL_W = 720
 VIZ_FOLIUM_CELL_H = 440
+# Matched height/margins for side-by-side ACF + distribution in forecast / quick historical views.
+PAIR_DIAG_PLOT_HEIGHT = 420
+PAIR_DIAG_PLOT_MARGIN = dict(t=50, b=40, l=55, r=25)
 
 # Initialize session state for map toggle
 if 'show_selection_map' not in st.session_state:
@@ -3907,6 +3918,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                         y_hist.values,
                                         title=f"ACF — {forecast_target} (historical AOI daily mean)",
                                         max_lag=min(40, max(5, len(y_hist) // 3)),
+                                        height=PAIR_DIAG_PLOT_HEIGHT,
+                                        margin=PAIR_DIAG_PLOT_MARGIN,
                                     )
                                 metric_description_hist = AVAILABLE_PARAMETERS.get(
                                     forecast_target,
@@ -4189,8 +4202,9 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     if dist_fig_fc:
                                         dist_fig_fc.update_layout(
                                             title=f"{forecast_target} — AOI daily mean",
-                                            height=420,
-                                            margin=dict(t=50, b=40),
+                                            height=PAIR_DIAG_PLOT_HEIGHT,
+                                            margin=PAIR_DIAG_PLOT_MARGIN,
+                                            autosize=True,
                                         )
                                         st.plotly_chart(dist_fig_fc, use_container_width=True, theme=None)
                                     else:
@@ -4418,6 +4432,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 y_ts.values,
                                 title=f"ACF — {selected_metric} (AOI daily mean)",
                                 max_lag=min(40, max(5, len(y_ts) // 3)),
+                                height=PAIR_DIAG_PLOT_HEIGHT,
+                                margin=PAIR_DIAG_PLOT_MARGIN,
                             )
                         metric_description = AVAILABLE_PARAMETERS.get(
                             selected_metric,
@@ -4437,8 +4453,9 @@ if not st.session_state.show_selection_map and processed_bounds:
                             if dist_fig:
                                 dist_fig.update_layout(
                                     title=f"{selected_metric} — AOI daily mean",
-                                    height=420,
-                                    margin=dict(t=50, b=40),
+                                    height=PAIR_DIAG_PLOT_HEIGHT,
+                                    margin=PAIR_DIAG_PLOT_MARGIN,
+                                    autosize=True,
                                 )
                                 st.plotly_chart(dist_fig, use_container_width=True, theme=None)
                             else:
