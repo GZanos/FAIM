@@ -54,9 +54,11 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
 
 from bayesian_linear_core import ConjugateBayesianLinearRegression, parse_tau_sigma_0_params
 
+IWFR_DISPLAY_NAME = "Intelligent Wildfire Forecaster (IWFR)"
+
 # Configure page
 st.set_page_config(
-    page_title="Intelligence Wildfire Forecaster (IWFR)",
+    page_title=IWFR_DISPLAY_NAME,
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -313,7 +315,7 @@ def _render_guide_video(local_path: Path, secret_key: str, env_key: str, fallbac
 
 if hasattr(st, "dialog"):
 
-    @st.dialog("Intelligence Wildfire Forecaster (IWFR) — How to use", width="large")
+    @st.dialog(f"{IWFR_DISPLAY_NAME} — How to use", width="large")
     def faim_howto_dialog():
         c1, c2 = st.columns(2)
         with c1:
@@ -382,7 +384,7 @@ else:
         st.sidebar.warning("Upgrade Streamlit to 1.33+ for the guide popup.")
 
 # Title and description
-st.title("🎯 Intelligence Wildfire Forecaster (IWFR)")
+st.title(f"🎯 {IWFR_DISPLAY_NAME}")
 st.markdown("""
 Advanced meteorological forecasting and fire risk analysis platform.
 
@@ -2279,7 +2281,7 @@ def _build_forecast_pdf_report_bytes(payload):
         story.append(img)
         story.append(Spacer(1, 0.22 * cm))
 
-    add_title("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
+    add_title(f"{IWFR_DISPLAY_NAME} Forecast Report")
     if payload.get("plain_summary"):
         add_para(payload["plain_summary"])
     if payload.get("insights_md"):
@@ -2399,7 +2401,7 @@ def _build_forecast_pdf_report_bytes_pillow(payload):
         page.paste(img, (margin, y))
         y += img.height + 18
 
-    write_line("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
+    write_line(f"{IWFR_DISPLAY_NAME} Forecast Report")
     write_line("-" * 40)
     for ln in str(payload.get("plain_summary", "")).split("\n"):
         if ln.strip():
@@ -3245,7 +3247,7 @@ if hasattr(st, "dialog"):
 
     @st.dialog("🤖 IWFR Assistant", width="large")
     def faim_assistant_dialog():
-        st.caption("Tips and how-to for Intelligence Wildfire Forecaster (IWFR). Close with the dialog X when you are done.")
+        st.caption(f"Tips and how-to for {IWFR_DISPLAY_NAME}. Close with the dialog X when you are done.")
         chat_messages_container = st.container(height=420)
         with chat_messages_container:
             for message in st.session_state.chat_history:
@@ -4571,9 +4573,9 @@ with c2:
 
 # Footer
 st.markdown("---")
-st.markdown("""
+st.markdown(f"""
 <div style='text-align: center; color: gray;'>
-🎯 Intelligence Wildfire Forecaster (IWFR) v1.5.3 | Built with Streamlit<br>
+🎯 {IWFR_DISPLAY_NAME} v1.5.3 | Built with Streamlit<br>
 Powered by NASA POWER data from Goddard Earth Sciences Data and Information Services Center (GES DISC)
 </div>
 """, unsafe_allow_html=True)
