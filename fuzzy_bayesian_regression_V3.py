@@ -156,7 +156,9 @@ class FuzzyBayesianRegression:
                  fuzzify_variance=0.05,
                  uncertainty_weight=0.5,
                  use_quadratic=True,
-                 small_delta_threshold=0.4):
+                 small_delta_threshold=0.4,
+                 tau=1.0,
+                 sigma_0_squared=1.0):
         """
         Parameters:
         - n_samples: Number of posterior samples for Bayesian inference
@@ -167,6 +169,8 @@ class FuzzyBayesianRegression:
         - uncertainty_weight: Weight for coefficient uncertainty
         - use_quadratic: Include quadratic terms
         - small_delta_threshold: Threshold for delta = mean/sqrt(variance) (default 0.4)
+        - tau: Prior std for slope coefficients beta_j (prior variance tau^2)
+        - sigma_0_squared: Prior variance for intercept beta_0
         """
         self.n_samples = n_samples
         self.symmetry_threshold = symmetry_threshold
@@ -176,6 +180,8 @@ class FuzzyBayesianRegression:
         self.uncertainty_weight = uncertainty_weight
         self.use_quadratic = use_quadratic
         self.small_delta_threshold = small_delta_threshold
+        self.tau = max(float(tau), 1e-8)
+        self.sigma_0_squared = max(float(sigma_0_squared), 1e-12)
         
         self.scaler_X = StandardScaler()
         self.scaler_y = StandardScaler()
@@ -185,53 +191,39 @@ class FuzzyBayesianRegression:
         
     def _bayesian_inference(self, X, y):
         """
-        Simplified Bayesian inference using conjugate priors
-        (Replaces JAGS for Python compatibility)
+        Conjugate Gaussian inference: beta_0 ~ N(0, sigma_0^2), beta_j ~ N(0, tau^2).
         """
+        from bayesian_linear_core import posterior_linear_samples
+
         n, p = X.shape
-        
-        # Ridge regression with Bayesian interpretation
-        # Prior: N(0, 1/λ)
-        lambda_prior = 1.0
-        
-        # Posterior mean (regularized least squares)
-        XtX = X.T @ X
-        Xty = X.T @ y
-        
-        # Add ridge regularization
-        posterior_cov = np.linalg.inv(XtX + lambda_prior * np.eye(p))
-        posterior_mean = posterior_cov @ Xty
-        
-        # Estimate residual variance
-        y_pred = X @ posterior_mean
-        residuals = y - y_pred
-        sigma_squared = np.var(residuals)
-        
-        # Generate posterior samples
-        samples = np.random.multivariate_normal(
-            posterior_mean, 
-            sigma_squared * posterior_cov, 
-            size=self.n_samples
+        samples = posterior_linear_samples(
+            X,
+            y,
+            n_samples=self.n_samples,
+            tau=self.tau,
+            sigma_0_squared=self.sigma_0_squared,
         )
-        
-        # Convert to GFNs
+        # samples columns: [beta_0, beta_1, ..., beta_p] for design [1, X]
+        intercept_mean = float(np.mean(samples[:, 0]))
+        intercept_var = float(np.var(samples[:, 0]))
+        intercept_gfn = GeneralizedFuzzyNumber(intercept_mean, max(intercept_var, 1e-12))
+
         beta_gfns = []
         for j in range(p):
-            beta_mean = np.mean(samples[:, j])
-            beta_var = np.var(samples[:, j])
-            
-            # Add uncertainty weighting
-            beta_var = beta_var * self.uncertainty_weight + \
-                      (1 - self.uncertainty_weight) * np.mean(np.var(samples, axis=0))
-            
-            beta_gfns.append(GeneralizedFuzzyNumber(beta_mean, beta_var))
-        
-        # Intercept (assumed zero after standardization)
-        intercept_gfn = GeneralizedFuzzyNumber(0.0, sigma_squared * 0.1)
-        
-        # Residual variance as GFN
+            col = j + 1
+            beta_mean = float(np.mean(samples[:, col]))
+            beta_var = float(np.var(samples[:, col]))
+            beta_var = beta_var * self.uncertainty_weight + (
+                (1 - self.uncertainty_weight) * float(np.mean(np.var(samples, axis=0)))
+            )
+            beta_gfns.append(GeneralizedFuzzyNumber(beta_mean, max(beta_var, 1e-12)))
+
+        mean_coef = np.mean(samples, axis=0)
+        Xd = np.column_stack([np.ones(n, dtype=float), X])
+        y_hat = Xd @ mean_coef
+        sigma_squared = float(max(np.var(y - y_hat), 1e-12))
         sigma_gfn = GeneralizedFuzzyNumber(0.0, sigma_squared)
-        
+
         return intercept_gfn, beta_gfns, sigma_gfn
     
     def _add_quadratic_features(self, X):

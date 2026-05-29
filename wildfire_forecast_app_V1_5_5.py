@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 
 import streamlit.components.v1 as components
-from sklearn.linear_model import ARDRegression, LinearRegression, Ridge
+from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -51,6 +51,8 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
             FBLIR_AVAILABLE = False
             # FBLiR is optional - app will work without it
             # Note: Ensure fuzzy_bayesian_regression_V3.py (or V2/original) is in the same directory
+
+from bayesian_linear_core import ConjugateBayesianLinearRegression, parse_tau_sigma_0_params
 
 # Configure page
 st.set_page_config(
@@ -1178,6 +1180,34 @@ def train_gradient_boosting(X_train, y_train, X_future, params=None):
     predictions = model.predict(X_future)
     return predictions
 
+def _fblir_n_samples_from_params(params: dict) -> int:
+    adapt = int(params.get("adapt_steps", 200))
+    burnin = int(params.get("burnin_steps", 200))
+    n_chains = max(1, int(params.get("N_chains", 2)))
+    thinning = max(1, int(params.get("thinning_steps", 7)))
+    return min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
+
+
+def _build_fblir_regressor(params: dict | None):
+    """Construct FuzzyBayesianRegression with GFN + prior hyperparameters (tau, sigma_0^2)."""
+    params = params or {}
+    tau, sigma_0_squared = parse_tau_sigma_0_params(params)
+    n_samples = _fblir_n_samples_from_params(params)
+    base_kw = dict(
+        n_samples=n_samples,
+        symmetry_threshold=params.get("symmetry_threshold", 0.5),
+        k=params.get("k", 0.5),
+        m=params.get("m", 0.1),
+        fuzzify_variance=params.get("fuzzification_factor", 0.05),
+        use_quadratic=True,
+        small_delta_threshold=params.get("symmetry_threshold", 0.4),
+    )
+    try:
+        return FuzzyBayesianRegression(tau=tau, sigma_0_squared=sigma_0_squared, **base_kw)
+    except TypeError:
+        return FuzzyBayesianRegression(**base_kw)
+
+
 def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
     """Train Fuzzy Bayesian Linear Regression model"""
     if not FBLIR_AVAILABLE:
@@ -1192,33 +1222,15 @@ def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
             'N_chains': 2,
             'adapt_steps': 200,
             'burnin_steps': 200,
-            'thinning_steps': 7
+            'thinning_steps': 7,
+            'tau': 1.0,
+            'sigma_0_squared': 1.0,
         }
     
     try:
         # Check if we have FuzzyBayesianRegression (V2/V3) or only FuzzyBayesianRegressionTuned (original)
         if FuzzyBayesianRegression is not None:
-            # Use V2/V3: Calculate n_samples from Bayesian parameters
-            # Note: n_samples is the number of posterior samples, not total MCMC steps
-            # We use a reasonable calculation: base samples per chain, scaled by chains and thinning
-            adapt = int(params.get("adapt_steps", 200))
-            burnin = int(params.get("burnin_steps", 200))
-            n_chains = max(1, int(params.get("N_chains", 2)))
-            thinning = max(1, int(params.get("thinning_steps", 7)))
-            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
-            
-            # Use FuzzyBayesianRegression directly to pass all parameters
-            # Using Gaussian Fuzzy Numbers (GFN) operations from Abdalla & Buckley 2007
-            model = FuzzyBayesianRegression(
-                n_samples=n_samples,
-                symmetry_threshold=params.get('symmetry_threshold', 0.5),
-                k=params.get('k', 0.5),  # Deprecated but kept for compatibility
-                m=params.get('m', 0.1),  # Defuzzification magnitude (optimal typically 0.1-0.3)
-                fuzzify_variance=params.get('fuzzification_factor', 0.05),
-                use_quadratic=True,
-                small_delta_threshold=params.get('symmetry_threshold', 0.4)  # Delta threshold for defuzzification (from R code)
-            )
-            # Fit the model
+            model = _build_fblir_regressor(params)
             model.fit(X_train, y_train)
             predictions = model.predict(X_future)
             return predictions
@@ -1870,26 +1882,10 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Bayesian Linear Regression":
-        # BayesianRidge often collapses to ~intercept-only fits when lags + calendar features are
-        # highly correlated. ARD regression keeps a Bayesian linear model but with per-feature scales.
-        # A modest Ridge blend restores seasonal structure in fitted values (matches iterative path).
         mp = model_params.get("Bayesian Linear Regression") or {}
-        m = ARDRegression(
-            alpha_1=float(mp.get("alpha_1", 1e-6)),
-            alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=float(mp.get("lambda_1", 1e-6)),
-            lambda_2=float(mp.get("lambda_2", 1e-6)),
-            max_iter=700,
-            tol=1e-4,
-            threshold_lambda=1e12,
-        )
+        m = ConjugateBayesianLinearRegression.from_params(mp)
         m.fit(X_scaled, y_arr)
-        ridge_stab = Ridge(alpha=1.5, random_state=42)
-        ridge_stab.fit(X_scaled, y_arr)
-        blend = 0.26
-        p_ard = np.asarray(m.predict(X_scaled), dtype=float)
-        p_r = np.asarray(ridge_stab.predict(X_scaled), dtype=float)
-        return (1.0 - blend) * p_ard + blend * p_r
+        return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
         m = RandomForestRegressor(
@@ -1927,20 +1923,7 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
     if method == "FBLiR":
         params = model_params.get("FBLiR") or {}
         if FuzzyBayesianRegression is not None:
-            adapt = int(params.get("adapt_steps", 200))
-            burnin = int(params.get("burnin_steps", 200))
-            thinning = max(1, int(params.get("thinning_steps", 7)))
-            n_chains = max(1, int(params.get("N_chains", 2)))
-            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
-            m = FuzzyBayesianRegression(
-                n_samples=n_samples,
-                symmetry_threshold=params.get("symmetry_threshold", 0.5),
-                k=params.get("k", 0.5),
-                m=params.get("m", 0.1),
-                fuzzify_variance=params.get("fuzzification_factor", 0.05),
-                use_quadratic=True,
-                small_delta_threshold=params.get("symmetry_threshold", 0.4),
-            )
+            m = _build_fblir_regressor(params)
             m.fit(X_scaled, y_arr)
             return np.asarray(m.predict(X_scaled), dtype=float).ravel()
         split_idx = int(len(X_scaled) * 0.8)
@@ -2497,24 +2480,11 @@ def run_iterative_ml_forecast(
 
     elif method == "Bayesian Linear Regression":
         mp = model_params.get("Bayesian Linear Regression") or {}
-        model = ARDRegression(
-            alpha_1=float(mp.get("alpha_1", 1e-6)),
-            alpha_2=float(mp.get("alpha_2", 1e-6)),
-            lambda_1=float(mp.get("lambda_1", 1e-6)),
-            lambda_2=float(mp.get("lambda_2", 1e-6)),
-            max_iter=700,
-            tol=1e-4,
-            threshold_lambda=1e12,
-        )
+        model = ConjugateBayesianLinearRegression.from_params(mp)
         model.fit(X_scaled, y)
-        ridge_stab = Ridge(alpha=1.5, random_state=42)
-        ridge_stab.fit(X_scaled, y)
-        _blr_blend = 0.26
 
         def predict_one(row_scaled_df):
-            pa = float(model.predict(row_scaled_df)[0])
-            pr = float(ridge_stab.predict(row_scaled_df)[0])
-            return float((1.0 - _blr_blend) * pa + _blr_blend * pr)
+            return float(model.predict(row_scaled_df)[0])
 
     elif method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
@@ -2566,18 +2536,7 @@ def run_iterative_ml_forecast(
         adapt = int(params.get("adapt_steps", 200))
         burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
-            thinning = max(1, int(params.get("thinning_steps", 7)))
-            n_chains = max(1, int(params.get("N_chains", 2)))
-            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
-            model = FuzzyBayesianRegression(
-                n_samples=n_samples,
-                symmetry_threshold=params.get("symmetry_threshold", 0.5),
-                k=params.get("k", 0.5),
-                m=params.get("m", 0.1),
-                fuzzify_variance=params.get("fuzzification_factor", 0.05),
-                use_quadratic=True,
-                small_delta_threshold=params.get("symmetry_threshold", 0.4),
-            )
+            model = _build_fblir_regressor(params)
             model.fit(X_scaled, y)
 
             def predict_one(row_scaled_df):
@@ -2609,7 +2568,7 @@ def run_iterative_ml_forecast(
         if method in ("Linear Regression", "Bayesian Linear Regression"):
             tail_z = current_data[forecast_target].tail(21)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            # Anchor blend tames recursive drift; Bayesian linear uses a lighter mix (ARD + Ridge blend already stabilizes).
+            # Anchor blend tames recursive drift; Bayesian linear uses a lighter mix.
             mix = 0.14 if method == "Linear Regression" else 0.045
             pred = (1.0 - mix) * pred + mix * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
@@ -2839,15 +2798,30 @@ if data_source == "Forecasting":
 
         if "Bayesian Linear Regression" in forecast_methods:
             st.markdown("**Bayesian Linear Regression**")
-            blr_alpha_1 = st.number_input("alpha_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_1")
-            blr_alpha_2 = st.number_input("alpha_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_2")
-            blr_lambda_1 = st.number_input("lambda_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_1")
-            blr_lambda_2 = st.number_input("lambda_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_2")
+            st.markdown("**Bayesian prior hyperparameters:**")
+            blr_tau = st.number_input(
+                "tau (prior std for slopes β_j)",
+                min_value=1e-4,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="blr_tau",
+                help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (slopes).",
+            )
+            blr_sigma0 = st.number_input(
+                "sigma_0_squared (prior variance for intercept β_0)",
+                min_value=1e-6,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="blr_sigma0",
+                help="Prior: β_0 ~ N(0, σ₀²).",
+            )
             model_params["Bayesian Linear Regression"] = {
-                "alpha_1": float(blr_alpha_1),
-                "alpha_2": float(blr_alpha_2),
-                "lambda_1": float(blr_lambda_1),
-                "lambda_2": float(blr_lambda_2),
+                "tau": float(blr_tau),
+                "sigma_0_squared": float(blr_sigma0),
             }
         
         if 'Gradient Boosting' in forecast_methods:
@@ -2887,6 +2861,28 @@ if data_source == "Forecasting":
         
         if 'FBLiR' in forecast_methods and FBLIR_AVAILABLE:
             st.markdown("**FBLiR (Fuzzy Bayesian Linear Regression)**")
+
+            st.markdown("**Bayesian prior hyperparameters:**")
+            fblir_tau = st.number_input(
+                "tau (prior std for slopes β_j)",
+                min_value=1e-4,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="fblir_tau",
+                help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (model-fit layer, before GFN fuzzification).",
+            )
+            fblir_sigma0 = st.number_input(
+                "sigma_0_squared (prior variance for intercept β_0)",
+                min_value=1e-6,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="fblir_sigma0",
+                help="Prior: β_0 ~ N(0, σ₀²).",
+            )
             
             # GFN Operation Parameters
             st.markdown("**GFN Operation Parameters:**")
@@ -2911,6 +2907,8 @@ if data_source == "Forecasting":
                                                    help="Thinning interval for MCMC samples")
             
             model_params['FBLiR'] = {
+                'tau': float(fblir_tau),
+                'sigma_0_squared': float(fblir_sigma0),
                 'm': fblir_m,
                 'k': fblir_k,
                 'fuzzification_factor': fblir_fuzz,
