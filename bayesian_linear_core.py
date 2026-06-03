@@ -31,6 +31,33 @@ def _as_design_matrix(X) -> np.ndarray:
     return X
 
 
+def sanitize_float_matrix(X, clip: float = 1e10) -> np.ndarray:
+    """Replace non-finite values and clip extremes for sklearn / linear algebra."""
+    X = _as_design_matrix(X)
+    finite = np.isfinite(X)
+    if not finite.all():
+        col_fill = np.zeros(X.shape[1], dtype=float)
+        for j in range(X.shape[1]):
+            col = X[:, j]
+            ok = np.isfinite(col)
+            col_fill[j] = float(np.median(col[ok])) if ok.any() else 0.0
+        X = np.where(finite, X, col_fill)
+    if clip is not None and clip > 0:
+        X = np.clip(X, -float(clip), float(clip))
+    return X
+
+
+def sanitize_float_vector(y, clip: float = 1e10) -> np.ndarray:
+    y = np.asarray(y, dtype=float).ravel()
+    ok = np.isfinite(y)
+    if not ok.all():
+        fill = float(np.median(y[ok])) if ok.any() else 0.0
+        y = np.where(ok, y, fill)
+    if clip is not None and clip > 0:
+        y = np.clip(y, -float(clip), float(clip))
+    return y
+
+
 def conjugate_posterior_linear(
     X,
     y,
@@ -42,8 +69,8 @@ def conjugate_posterior_linear(
     [sigma_0^2, tau^2, ..., tau^2].
     Returns (posterior_mean, posterior_cov, sigma_squared).
     """
-    X = _as_design_matrix(X)
-    y = np.asarray(y, dtype=float).ravel()
+    X = sanitize_float_matrix(X)
+    y = sanitize_float_vector(y)
     n, p = X.shape
     if n < 2:
         raise ValueError("Need at least 2 samples for Bayesian linear regression.")
@@ -60,6 +87,7 @@ def conjugate_posterior_linear(
     sigma_squared = float(max(np.var(residuals), 1e-12))
 
     prec_post = (Xd.T @ Xd) / sigma_squared + prior_prec
+    prec_post = prec_post + np.eye(prec_post.shape[0], dtype=float) * 1e-10
     cov_post = np.linalg.inv(prec_post)
     mean_post = cov_post @ (Xd.T @ y / sigma_squared)
     return mean_post, cov_post, sigma_squared
@@ -103,7 +131,7 @@ class ConjugateBayesianLinearRegression:
     def predict(self, X):
         if self.coef_ is None:
             raise ValueError("Model must be fitted before predict.")
-        X = _as_design_matrix(X)
+        X = sanitize_float_matrix(X)
         n = X.shape[0]
         Xd = np.column_stack([np.ones(n, dtype=float), X])
         return Xd @ self.coef_

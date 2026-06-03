@@ -241,12 +241,16 @@ class FuzzyBayesianRegression:
         - X: Feature matrix (n_samples, n_features)
         - y: Target vector (n_samples,)
         """
-        # Standardize
-        X_scaled = self.scaler_X.fit_transform(X)
-        y_scaled = self.scaler_y.fit_transform(_ensure_2d_array(y)).ravel()
+        from bayesian_linear_core import sanitize_float_matrix, sanitize_float_vector
+
+        X_arr = sanitize_float_matrix(X)
+        y_arr = sanitize_float_vector(y)
+        X_scaled = self.scaler_X.fit_transform(X_arr)
+        y_scaled = self.scaler_y.fit_transform(_ensure_2d_array(y_arr)).ravel()
         
         # Add quadratic features
         X_augmented = self._add_quadratic_features(X_scaled)
+        X_augmented = np.clip(X_augmented, -1e8, 1e8)
         
         # Bayesian inference
         self.intercept, self.coefficients, self.sigma_gfn = \
@@ -273,11 +277,14 @@ class FuzzyBayesianRegression:
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
         
-        # Standardize
-        X_scaled = self.scaler_X.transform(X)
+        from bayesian_linear_core import sanitize_float_matrix
+
+        X_arr = sanitize_float_matrix(X)
+        X_scaled = self.scaler_X.transform(X_arr)
         
         # Add quadratic features
         X_augmented = self._add_quadratic_features(X_scaled)
+        X_augmented = np.clip(X_augmented, -1e8, 1e8)
         
         predictions = []
         

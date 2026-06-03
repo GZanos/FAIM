@@ -52,7 +52,12 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
             # FBLiR is optional - app will work without it
             # Note: Ensure fuzzy_bayesian_regression_V3.py (or V2/original) is in the same directory
 
-from bayesian_linear_core import ConjugateBayesianLinearRegression, parse_tau_sigma_0_params
+from bayesian_linear_core import (
+    ConjugateBayesianLinearRegression,
+    parse_tau_sigma_0_params,
+    sanitize_float_matrix,
+    sanitize_float_vector,
+)
 
 IWFR_DISPLAY_NAME = "Intelligent Wildfire Forecaster (IWFR)"
 
@@ -1007,7 +1012,13 @@ def prepare_ml_features(df, target_col, feature_cols, lag_days=7):
     # Fill remaining NaN with forward fill then backward fill (pandas 2.2+ removed fillna(method=...))
     for col in feature_names:
         if col in df_clean.columns:
-            df_clean[col] = df_clean[col].ffill().bfill().fillna(0)
+            df_clean[col] = (
+                df_clean[col]
+                .replace([np.inf, -np.inf], np.nan)
+                .ffill()
+                .bfill()
+                .fillna(0)
+            )
     
     return df_clean, feature_names
 
@@ -1924,19 +1935,20 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "FBLiR":
         params = model_params.get("FBLiR") or {}
+        X_raw = df_ml[list(X_scaled.columns)]
         if FuzzyBayesianRegression is not None:
             m = _build_fblir_regressor(params)
-            m.fit(X_scaled, y_arr)
-            return np.asarray(m.predict(X_scaled), dtype=float).ravel()
+            m.fit(X_raw, y_arr)
+            return np.asarray(m.predict(X_raw), dtype=float).ravel()
         split_idx = int(len(X_scaled) * 0.8)
-        X_train_f = X_scaled.iloc[:split_idx]
+        X_train_f = X_raw.iloc[:split_idx]
         y_train_f = pd.Series(y_arr).iloc[:split_idx]
-        X_val_f = X_scaled.iloc[split_idx:]
+        X_val_f = X_raw.iloc[split_idx:]
         y_val_f = pd.Series(y_arr).iloc[split_idx:]
         base_samples = min(max(100, int(params.get("adapt_steps", 200)) + int(params.get("burnin_steps", 200))), 1500)
         m = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
         m.fit(X_train_f, y_train_f, X_val_f, y_val_f)
-        return np.asarray(m.predict(X_scaled), dtype=float).ravel()
+        return np.asarray(m.predict(X_raw), dtype=float).ravel()
     if method == "Prophet":
         df_prophet = df_ml[["date", forecast_target]].copy()
         df_prophet.columns = ["ds", "y"]
@@ -2535,44 +2547,58 @@ def run_iterative_ml_forecast(
         if not FBLIR_AVAILABLE:
             raise ImportError("FBLiR is not available.")
         params = model_params.get("FBLiR") or {}
+        X_raw = df_ml[feature_names]
         adapt = int(params.get("adapt_steps", 200))
         burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
             model = _build_fblir_regressor(params)
-            model.fit(X_scaled, y)
+            model.fit(X_raw, y)
 
-            def predict_one(row_scaled_df):
-                pr = model.predict(row_scaled_df)
+            def predict_one(row_df):
+                pr = model.predict(row_df)
                 return float(np.asarray(pr).ravel()[0])
         else:
-            split_idx = int(len(X_scaled) * 0.8)
-            X_train_f = X_scaled.iloc[:split_idx]
+            split_idx = int(len(X_raw) * 0.8)
+            X_train_f = X_raw.iloc[:split_idx]
             y_train_f = y.iloc[:split_idx]
-            X_val_f = X_scaled.iloc[split_idx:]
+            X_val_f = X_raw.iloc[split_idx:]
             y_val_f = y.iloc[split_idx:]
             base_samples = min(max(100, adapt + burnin), 1500)
             model = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
             model.fit(X_train_f, y_train_f, X_val_f, y_val_f)
 
-            def predict_one(row_scaled_df):
-                pr = model.predict(row_scaled_df)
+            def predict_one(row_df):
+                pr = model.predict(row_df)
                 return float(np.asarray(pr).ravel()[0])
     else:
         raise ValueError(f"Unknown iterative ML method: {method}")
 
+    use_fblir_raw = method == "FBLiR"
+
     for _step in range(forecast_horizon):
         last_row = current_data.iloc[[-1]][feature_names]
-        last_row_scaled = pd.DataFrame(
-            scaler.transform(last_row),
+        last_row = pd.DataFrame(
+            sanitize_float_matrix(last_row.values),
             columns=feature_names,
         )
-        pred = predict_one(last_row_scaled)
+        if use_fblir_raw:
+            pred = predict_one(last_row)
+        else:
+            last_row_scaled = pd.DataFrame(
+                scaler.transform(last_row),
+                columns=feature_names,
+            )
+            pred = predict_one(last_row_scaled)
         if method in ("Linear Regression", "Bayesian Linear Regression"):
             tail_z = current_data[forecast_target].tail(21)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
             # Anchor blend tames recursive drift; Bayesian linear uses a lighter mix.
             mix = 0.14 if method == "Linear Regression" else 0.045
             pred = (1.0 - mix) * pred + mix * anchor
+            pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
+        elif method == "FBLiR":
+            if not np.isfinite(pred):
+                pred = float(current_data[forecast_target].iloc[-1])
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         predictions.append(pred)
 
@@ -3790,6 +3816,11 @@ if not st.session_state.show_selection_map and processed_bounds:
                             else:
                                 X = df_ml[feature_names]
                                 y = df_ml[forecast_target]
+
+                                X_values = sanitize_float_matrix(X.values)
+                                X = pd.DataFrame(X_values, columns=feature_names, index=X.index)
+                                y_values = sanitize_float_vector(y.values)
+                                y = pd.Series(y_values, index=y.index, name=forecast_target)
 
                                 scaler = StandardScaler()
                                 X_scaled = pd.DataFrame(
