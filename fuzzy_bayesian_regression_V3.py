@@ -3,6 +3,8 @@ Fuzzy Bayesian Linear Regression (FBLiR) for Time Series Forecasting
 Python implementation compatible with FAIM forecasting framework
 """
 
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from scipy.stats import norm, gamma

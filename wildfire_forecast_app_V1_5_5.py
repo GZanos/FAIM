@@ -52,20 +52,105 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
             # FBLiR is optional - app will work without it
             # Note: Ensure fuzzy_bayesian_regression_V3.py (or V2/original) is in the same directory
 
-try:
-    from bayesian_linear_core import (
-        ConjugateBayesianLinearRegression,
-        parse_tau_sigma_0_params,
-        sanitize_float_matrix,
-        sanitize_float_vector,
-    )
-except ImportError:
-    from fuzzy_bayesian_regression_V3 import (
-        ConjugateBayesianLinearRegression,
-        parse_tau_sigma_0_params,
-        sanitize_float_matrix,
-        sanitize_float_vector,
-    )
+
+def parse_tau_sigma_0_params(params=None):
+    """Read tau and sigma_0_squared from model_params dict."""
+    params = params or {}
+    tau = float(params.get("tau", 1.0))
+    if tau <= 0:
+        tau = 1.0
+    sigma_0_squared = float(params.get("sigma_0_squared", params.get("sigma_0_sq", 1.0)))
+    if sigma_0_squared <= 0:
+        sigma_0_squared = 1.0
+    return tau, sigma_0_squared
+
+
+def _as_design_matrix(X):
+    if isinstance(X, pd.DataFrame):
+        return np.asarray(X, dtype=float)
+    X = np.asarray(X, dtype=float)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    return X
+
+
+def sanitize_float_matrix(X, clip=1e10):
+    """Replace non-finite values and clip extremes for sklearn / linear algebra."""
+    X = _as_design_matrix(X)
+    finite = np.isfinite(X)
+    if not finite.all():
+        col_fill = np.zeros(X.shape[1], dtype=float)
+        for j in range(X.shape[1]):
+            col = X[:, j]
+            ok = np.isfinite(col)
+            col_fill[j] = float(np.median(col[ok])) if ok.any() else 0.0
+        X = np.where(finite, X, col_fill)
+    if clip is not None and clip > 0:
+        X = np.clip(X, -float(clip), float(clip))
+    return X
+
+
+def sanitize_float_vector(y, clip=1e10):
+    y = np.asarray(y, dtype=float).ravel()
+    ok = np.isfinite(y)
+    if not ok.all():
+        fill = float(np.median(y[ok])) if ok.any() else 0.0
+        y = np.where(ok, y, fill)
+    if clip is not None and clip > 0:
+        y = np.clip(y, -float(clip), float(clip))
+    return y
+
+
+def _conjugate_posterior_linear(X, y, tau=1.0, sigma_0_squared=1.0):
+    X = sanitize_float_matrix(X)
+    y = sanitize_float_vector(y)
+    n, p = X.shape
+    if n < 2:
+        raise ValueError("Need at least 2 samples for Bayesian linear regression.")
+    tau = max(float(tau), 1e-8)
+    sigma_0_squared = max(float(sigma_0_squared), 1e-12)
+    Xd = np.column_stack([np.ones(n, dtype=float), X])
+    prior_var = np.concatenate([[sigma_0_squared], np.full(p, tau ** 2, dtype=float)])
+    prior_prec = np.diag(1.0 / prior_var)
+    y_hat_init = Xd @ (np.linalg.lstsq(Xd, y, rcond=None)[0])
+    residuals = y - y_hat_init
+    sigma_squared = float(max(np.var(residuals), 1e-12))
+    prec_post = (Xd.T @ Xd) / sigma_squared + prior_prec
+    prec_post = prec_post + np.eye(prec_post.shape[0], dtype=float) * 1e-10
+    cov_post = np.linalg.inv(prec_post)
+    mean_post = cov_post @ (Xd.T @ y / sigma_squared)
+    return mean_post, cov_post, sigma_squared
+
+
+class ConjugateBayesianLinearRegression:
+    """Bayesian Linear Regression (BLiR) with explicit tau and sigma_0^2 priors."""
+
+    def __init__(self, tau=1.0, sigma_0_squared=1.0):
+        self.tau = float(tau)
+        self.sigma_0_squared = float(sigma_0_squared)
+        self.coef_ = None
+        self.posterior_cov_ = None
+        self.sigma_squared_ = None
+
+    @classmethod
+    def from_params(cls, params=None):
+        tau, sigma_0_squared = parse_tau_sigma_0_params(params)
+        return cls(tau=tau, sigma_0_squared=sigma_0_squared)
+
+    def fit(self, X, y):
+        self.coef_, self.posterior_cov_, self.sigma_squared_ = _conjugate_posterior_linear(
+            X, y, tau=self.tau, sigma_0_squared=self.sigma_0_squared
+        )
+        return self
+
+    def predict(self, X):
+        if self.coef_ is None:
+            raise ValueError("Model must be fitted before predict.")
+        X = sanitize_float_matrix(X)
+        n = X.shape[0]
+        Xd = np.column_stack([np.ones(n, dtype=float), X])
+        return Xd @ self.coef_
+
 
 IWFR_DISPLAY_NAME = "Intelligent Wildfire Forecaster (IWFR)"
 
