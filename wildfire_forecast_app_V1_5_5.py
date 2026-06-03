@@ -3256,7 +3256,27 @@ if data_source == "Forecasting":
 
         if "Bayesian Linear Regression" in forecast_methods:
             st.markdown("**Bayesian Linear Regression**")
-            st.markdown("**ARD prior hyperparameters (sklearn):**")
+            st.markdown("**Prior hyperparameters:**")
+            blr_tau = st.number_input(
+                "tau",
+                min_value=1e-4,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="blr_tau",
+                help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (display only; ARD fit uses alpha/lambda below).",
+            )
+            blr_sigma = st.number_input(
+                "sigma",
+                min_value=1e-6,
+                max_value=100.0,
+                value=1.0,
+                step=0.1,
+                format="%.4f",
+                key="blr_sigma",
+                help="Prior: β_0 ~ N(0, σ²) (display only; ARD fit uses alpha/lambda below).",
+            )
             blr_alpha1 = st.number_input(
                 "alpha_1",
                 min_value=1e-10,
@@ -3344,15 +3364,10 @@ if data_source == "Forecasting":
         
         if 'FBLiR' in forecast_methods:
             st.markdown("**FBLiR (Fuzzy Bayesian Linear Regression)**")
-            st.caption(
-                "FBLiR fits the same BLiR (ARD) model, wraps coefficient means/variances and "
-                "inputs as GFNs, applies GFN arithmetic, then defuzzifies. Forecasts differ "
-                "slightly from BLiR; diagnostics stay comparable because learning is shared."
-            )
 
-            st.markdown("**Bayesian prior hyperparameters:**")
+            st.markdown("**Prior hyperparameters:**")
             fblir_tau = st.number_input(
-                "tau (prior std for slopes β_j)",
+                "tau",
                 min_value=1e-4,
                 max_value=100.0,
                 value=1.0,
@@ -3362,14 +3377,14 @@ if data_source == "Forecasting":
                 help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (model-fit layer, before GFN fuzzification).",
             )
             fblir_sigma0 = st.number_input(
-                "sigma_0_squared (prior variance for intercept β_0)",
+                "sigma",
                 min_value=1e-6,
                 max_value=100.0,
                 value=1.0,
                 step=0.1,
                 format="%.4f",
                 key="fblir_sigma0",
-                help="Prior: β_0 ~ N(0, σ₀²).",
+                help="Prior: β_0 ~ N(0, σ²).",
             )
             
             # GFN Operation Parameters
