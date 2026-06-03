@@ -1225,27 +1225,71 @@ def _build_blir_regressor(params=None):
     )
 
 
-class AppFuzzyBLiR:
-    """Self-contained FBLiR that shares the exact BLiR (ARD) backbone.
+class _IWFR_GFN:
+    """Minimal Gaussian fuzzy number (GFN) for in-app FBLiR inference."""
 
-    Why this exists: the previous FBLiR relied on the external
-    ``fuzzy_bayesian_regression_V3`` module's quadratic fuzzy-defuzzification path,
-    which over-predicted badly (fitted >> data range) and was fragile across
-    deployments. Here the point prediction is BLiR by construction, so diagnostics
-    match BLiR exactly. A Gaussian-fuzzy coefficient layer adds a small, *zero-mean*
-    (in-sample) bounded refinement plus principled predictive uncertainty, so FBLiR
-    is at least as good as the best linear model while remaining genuinely fuzzy.
+    __slots__ = ("mean", "variance")
+
+    def __init__(self, mean, variance):
+        self.mean = float(mean)
+        self.variance = max(float(variance), 0.0)
+
+    @staticmethod
+    def add(a, b):
+        return _IWFR_GFN(a.mean + b.mean, a.variance + b.variance)
+
+    @staticmethod
+    def multiply(a, b):
+        return _IWFR_GFN(
+            a.mean * b.mean,
+            (b.variance * a.mean ** 2) + (a.variance * b.mean ** 2) + (b.variance * a.variance),
+        )
+
+    def delta(self):
+        if self.variance <= 0:
+            return float("inf") if self.mean != 0 else 0.0
+        return abs(self.mean / np.sqrt(self.variance))
+
+    def defuzzify(self, m=0.1, small_delta_threshold=0.4, max_mean_adjustment=0.75):
+        if self.variance <= 0:
+            return self.mean
+        delta = self.delta()
+        fuzzy_shift = min(float(m) * self.variance, float(max_mean_adjustment))
+        threshold = float(small_delta_threshold)
+        if delta < threshold:
+            return self.mean + fuzzy_shift
+        # Above threshold: apply a taper so input/coefficient GFN uncertainty still
+        # produces a small, bounded difference from the crisp BLiR mean.
+        taper = threshold / max(delta, threshold)
+        return self.mean + fuzzy_shift * taper
+
+
+class AppFuzzyBLiR:
+    """FBLiR: BLiR (ARD) fit → GFN fuzzification → GFN arithmetic → defuzzification.
+
+    Learning is identical to BLiR (same ARD posterior means/variances for coefficients).
+    Forecasts differ slightly because inputs are fuzzified with small variance and the
+    accumulated fuzzy forecast is defuzzified with parameter ``m``.
     """
 
-    def __init__(self, blir_params=None, m=0.08, gfn_weight=0.05):
+    def __init__(
+        self,
+        blir_params=None,
+        m=0.1,
+        fuzzify_variance=0.05,
+        small_delta_threshold=0.4,
+        symmetry_threshold=0.5,
+    ):
         self.blir_params = dict(blir_params or {})
         self.m = float(m)
-        self.gfn_weight = float(np.clip(gfn_weight, 0.0, 0.25))
+        self.fuzzify_variance = max(float(fuzzify_variance), 0.0)
+        self.small_delta_threshold = float(small_delta_threshold)
+        self.symmetry_threshold = float(symmetry_threshold)
         self.blir_ = None
-        self.coef_var_ = None
+        self.intercept_gfn_ = None
+        self.coef_gfns_ = None
         self.resid_sigma_ = 1.0
-        self._corr_center_ = 0.0
-        # Flags so existing FBLiR helpers/branches treat this like a prescaled backbone model.
+        self._defuzz_cap_ = 0.75
         self._iwfr_fblir_backbone = True
         self._iwfr_uses_prescaled = True
 
@@ -1255,45 +1299,70 @@ class AppFuzzyBLiR:
         self.blir_ = _build_blir_regressor(self.blir_params)
         self.blir_.fit(X, yv)
 
+        coef = np.asarray(self.blir_.coef_, dtype=float).ravel()
         sigma = getattr(self.blir_, "sigma_", None)
-        if sigma is not None and np.ndim(sigma) == 2 and sigma.shape[0] == X.shape[1]:
-            self.coef_var_ = np.clip(np.diag(np.asarray(sigma, dtype=float)), 0.0, None)
+        if sigma is not None and np.ndim(sigma) == 2 and sigma.shape[0] == coef.shape[0]:
+            coef_var = np.clip(np.diag(np.asarray(sigma, dtype=float)), 1e-12, None)
         else:
-            lam = np.asarray(
-                getattr(self.blir_, "lambda_", np.ones(X.shape[1])), dtype=float
-            ).ravel()
-            self.coef_var_ = 1.0 / np.maximum(lam, 1e-12)
+            lam = np.asarray(getattr(self.blir_, "lambda_", np.ones(coef.shape[0])), dtype=float).ravel()
+            coef_var = 1.0 / np.maximum(lam, 1e-12)
 
-        resid = yv - np.asarray(self.blir_.predict(X), dtype=float).ravel()
+        intercept = float(getattr(self.blir_, "intercept_", 0.0))
+        self.intercept_gfn_ = _IWFR_GFN(intercept, 1e-12)
+        self.coef_gfns_ = [_IWFR_GFN(float(c), float(v)) for c, v in zip(coef, coef_var)]
+
+        y_blir = np.asarray(self.blir_.predict(X), dtype=float).ravel()
+        resid = yv - y_blir
         self.resid_sigma_ = float(max(np.std(resid), 1e-6))
-        # Center the fuzzy correction so it is zero-mean in-sample (no systematic bias).
-        _, var_tr = self._predictive(X)
-        corr_tr = np.clip(self.m * var_tr, -0.5 * self.resid_sigma_, 0.5 * self.resid_sigma_)
-        self._corr_center_ = float(np.mean(corr_tr)) if len(corr_tr) else 0.0
+        # Scale-aware cap so defuzzification nudges stay small relative to model noise.
+        self._defuzz_cap_ = float(min(0.75, max(0.02, 0.12 * self.resid_sigma_)))
         return self
 
-    def _predictive(self, X_scaled):
-        X = np.asarray(X_scaled, dtype=float)
-        mu = np.asarray(self.blir_.predict(X), dtype=float).ravel()
-        var = np.clip((X ** 2) @ self.coef_var_, 0.0, None)
-        return mu, var
-
     def predict_linear(self, X_scaled):
+        """Crisp BLiR point forecast (reference / diagnostics baseline)."""
         return np.asarray(self.blir_.predict(np.asarray(X_scaled, dtype=float)), dtype=float).ravel()
 
+    def _gfn_predict_row(self, x_row):
+        y_gfn = self.intercept_gfn_
+        for beta_gfn, x_val in zip(self.coef_gfns_, x_row):
+            x_gfn = _IWFR_GFN(float(x_val), self.fuzzify_variance)
+            product = _IWFR_GFN.multiply(beta_gfn, x_gfn)
+            y_gfn = _IWFR_GFN.add(y_gfn, product)
+        return y_gfn.defuzzify(
+            m=self.m,
+            small_delta_threshold=self.small_delta_threshold,
+            max_mean_adjustment=self._defuzz_cap_,
+        )
+
     def predict(self, X_scaled, input_prescaled=True, linear_only=False, include_residual_uncertainty=False):
-        mu, var = self._predictive(X_scaled)
-        if linear_only or self.gfn_weight <= 0:
-            return mu
-        corr = np.clip(self.m * var, -0.5 * self.resid_sigma_, 0.5 * self.resid_sigma_)
-        return mu + self.gfn_weight * (corr - self._corr_center_)
+        if linear_only:
+            return self.predict_linear(X_scaled)
+        X = np.asarray(X_scaled, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        return np.asarray([self._gfn_predict_row(row) for row in X], dtype=float).ravel()
 
     def predict_linear_mean(self, X_scaled, input_prescaled=True):
         return self.predict_linear(X_scaled)
 
     def predict_std(self, X_scaled):
-        _, var = self._predictive(X_scaled)
-        return np.sqrt(np.clip(var, 0.0, None) + self.resid_sigma_ ** 2)
+        """Predictive std from BLiR coefficient uncertainty (crisp inputs)."""
+        X = np.asarray(X_scaled, dtype=float)
+        coef_var = np.array([g.variance for g in self.coef_gfns_], dtype=float)
+        var = np.clip((X ** 2) @ coef_var, 0.0, None)
+        return np.sqrt(var + self.resid_sigma_ ** 2)
+
+
+def _build_app_fblir_from_params(fblir_params, blr_mp=None):
+    """Construct AppFuzzyBLiR from sidebar / model_params dict."""
+    params = dict(fblir_params or {})
+    return AppFuzzyBLiR(
+        blir_params=dict(blr_mp or {}),
+        m=float(params.get("m", 0.1)),
+        fuzzify_variance=float(params.get("fuzzification_factor", 0.05)),
+        small_delta_threshold=float(params.get("symmetry_threshold", 0.4)),
+        symmetry_threshold=float(params.get("symmetry_threshold", 0.5)),
+    )
 
 
 def _seasonal_target_reference(df_ml, forecast_target, target_date, window=12):
@@ -2306,11 +2375,7 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
     if method == "FBLiR":
         params = dict(model_params.get("FBLiR") or {})
         blr_mp = dict(model_params.get("Bayesian Linear Regression") or {})
-        model = AppFuzzyBLiR(
-            blir_params=blr_mp,
-            m=float(params.get("m", 0.08)),
-            gfn_weight=float(params.get("gfn_weight", 0.05)),
-        )
+        model = _build_app_fblir_from_params(params, blr_mp)
         model.fit(X_scaled, y_arr)
         return np.asarray(model.predict(X_scaled), dtype=float)
     if method == "Prophet":
@@ -2924,11 +2989,7 @@ def run_iterative_ml_forecast(
             blr_mp.update(tuned)
             if tune_note:
                 st.session_state["_iwfr_last_fblir_tune"] = tune_note.replace("BLiR", "FBLiR")
-        model = AppFuzzyBLiR(
-            blir_params=blr_mp,
-            m=float(params.get("m", 0.08)),
-            gfn_weight=float(params.get("gfn_weight", 0.05)),
-        )
+        model = _build_app_fblir_from_params(params, blr_mp)
         model.fit(X_scaled, y)
 
         def predict_one(row_scaled_df):
@@ -2953,9 +3014,7 @@ def run_iterative_ml_forecast(
             columns=feature_names,
         )
         if is_fblir:
-            # Use the stable BLiR linear core for the recursive step; the small fuzzy
-            # refinement is zero-mean and would otherwise compound over the horizon.
-            pred = float(model.predict_linear(last_row_scaled)[0])
+            pred = float(model.predict(last_row_scaled)[0])
         else:
             pred = predict_one(last_row_scaled)
 
@@ -3286,9 +3345,9 @@ if data_source == "Forecasting":
         if 'FBLiR' in forecast_methods:
             st.markdown("**FBLiR (Fuzzy Bayesian Linear Regression)**")
             st.caption(
-                "FBLiR shares the exact BLiR (ARD) learning backbone, then adds a small "
-                "Gaussian-fuzzy coefficient layer. Point forecasts match BLiR (the strongest "
-                "linear model) while the fuzzy layer adds calibrated uncertainty."
+                "FBLiR fits the same BLiR (ARD) model, wraps coefficient means/variances and "
+                "inputs as GFNs, applies GFN arithmetic, then defuzzifies. Forecasts differ "
+                "slightly from BLiR; diagnostics stay comparable because learning is shared."
             )
 
             st.markdown("**Bayesian prior hyperparameters:**")
@@ -3316,16 +3375,7 @@ if data_source == "Forecasting":
             # GFN Operation Parameters
             st.markdown("**GFN Operation Parameters:**")
             fblir_m = st.number_input("m (defuzzification magnitude)", min_value=0.0, max_value=1.0, value=0.1, step=0.01, key="fblir_m",
-                                     help="Defuzzification magnitude for GFN operations (optimal typically 0.1-0.3). Used in: mean + m*variance when delta < threshold")
-            fblir_gfn_weight = st.number_input(
-                "GFN refinement weight",
-                min_value=0.0,
-                max_value=0.25,
-                value=0.05,
-                step=0.01,
-                key="fblir_gfn_weight",
-                help="How strongly the (zero-mean, bounded) fuzzy correction nudges the BLiR point forecast. 0 = identical to BLiR.",
-            )
+                                     help="When output GFN delta < symmetry threshold, forecast += m × variance (small nudge away from BLiR).")
             fblir_k = st.number_input("k (defuzzification sensitivity)", min_value=-1.0, max_value=1.0, value=0.5, step=0.1, key="fblir_k",
                                      help="Defuzzification sensitivity parameter (deprecated but kept for compatibility)")
             fblir_fuzz = st.number_input("Fuzzification Factor", min_value=0.01, max_value=1.0, value=0.05, step=0.01, key="fblir_fuzz",
@@ -3348,7 +3398,6 @@ if data_source == "Forecasting":
                 'tau': float(fblir_tau),
                 'sigma_0_squared': float(fblir_sigma0),
                 'm': fblir_m,
-                'gfn_weight': float(fblir_gfn_weight),
                 'k': fblir_k,
                 'fuzzification_factor': fblir_fuzz,
                 'symmetry_threshold': fblir_symmetry,
