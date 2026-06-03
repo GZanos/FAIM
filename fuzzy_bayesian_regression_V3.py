@@ -288,12 +288,55 @@ class FuzzyBayesianRegression:
         self.intercept = None
         self.sigma_gfn = None
         self.posterior_mean_coef_ = None
+        self.blir_backbone_ = None
         self.is_fitted = False
         
+    def _set_identity_y_scaler(self, n_samples):
+        """Keep predictions in the same units as IWFR model-scale y (no extra scaling)."""
+        self.scaler_y.mean_ = np.array([0.0], dtype=float)
+        self.scaler_y.scale_ = np.array([1.0], dtype=float)
+        self.scaler_y.var_ = np.array([1.0], dtype=float)
+        self.scaler_y.n_features_in_ = 1
+        self.scaler_y.n_samples_seen_ = int(n_samples)
+
+    def fit_with_blir_backbone(self, blir_model, X, y, input_prescaled=False):
+        """
+        IWFR FBLiR: learn from the same ARD fit as BLiR, then wrap coefficients as GFNs.
+        Point predictions stay close to BLiR; GFN is a small post-layer adjustment.
+        """
+        self.blir_backbone_ = blir_model
+        self.use_quadratic = False
+        X_arr = self._scale_features(X, fit=True, input_prescaled=input_prescaled)
+        y_arr = sanitize_float_vector(y)
+        self._set_identity_y_scaler(len(y_arr))
+
+        coef = np.asarray(blir_model.coef_, dtype=float).ravel()
+        lambdas = np.asarray(
+            getattr(blir_model, "lambda_", np.full(coef.shape, 1.0, dtype=float)),
+            dtype=float,
+        ).ravel()
+        if len(lambdas) != len(coef):
+            lambdas = np.full(coef.shape, 1.0, dtype=float)
+        beta_vars = np.where(lambdas > 0, 1.0 / np.maximum(lambdas, 1e-12), 1e-6)
+        mean_var = float(np.mean(beta_vars)) if len(beta_vars) else 1e-6
+        beta_vars = beta_vars * self.uncertainty_weight + (1.0 - self.uncertainty_weight) * mean_var
+
+        self.intercept = GeneralizedFuzzyNumber(float(blir_model.intercept_), 1e-12)
+        self.coefficients = [
+            GeneralizedFuzzyNumber(float(c), max(float(v), 1e-12))
+            for c, v in zip(coef, beta_vars)
+        ]
+        y_hat = np.asarray(blir_model.predict(X_arr), dtype=float).ravel()
+        sigma2 = float(max(np.var(y_arr - y_hat), 1e-12))
+        self.sigma_gfn = GeneralizedFuzzyNumber(0.0, sigma2)
+        self.posterior_mean_coef_ = coef.copy()
+        self.is_fitted = True
+        return self
+
     def _bayesian_inference(self, X, y):
         """
         Ridge-style Gaussian posterior on scaled features (zero intercept; y is scaled).
-        Matches the pre-2025 FBLiR model-fit layer used in IWFR.
+        Legacy fallback when no BLiR backbone is attached.
         """
         n, p = X.shape
         y = np.asarray(y, dtype=float).ravel()
@@ -314,8 +357,9 @@ class FuzzyBayesianRegression:
 
         beta_gfns = []
         for j in range(p):
-            beta_mean = float(np.mean(samples[:, j]))
-            beta_var = float(np.var(samples[:, j]))
+            col = j
+            beta_mean = float(np.mean(samples[:, col]))
+            beta_var = float(np.var(samples[:, col]))
             beta_var = beta_var * self.uncertainty_weight + (
                 (1 - self.uncertainty_weight) * float(np.mean(np.var(samples, axis=0)))
             )
@@ -374,8 +418,10 @@ class FuzzyBayesianRegression:
         return self
     
     def _predict_linear_core(self, X, input_prescaled=False):
-        """Stable point predictions from posterior mean (used for multi-step forecasting)."""
+        """Stable point predictions from BLiR backbone or posterior mean."""
         X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
+        if getattr(self, "blir_backbone_", None) is not None:
+            return np.asarray(self.blir_backbone_.predict(X_scaled), dtype=float).ravel()
         X_augmented = self._add_quadratic_features(X_scaled)
         X_augmented = np.clip(X_augmented, -1e8, 1e8)
         if self.posterior_mean_coef_ is None:
@@ -386,10 +432,34 @@ class FuzzyBayesianRegression:
     def predict_linear_mean(self, X, input_prescaled=False):
         return self._predict_linear_core(X, input_prescaled=input_prescaled)
     
-    def _fuzzify_features(self, X):
-        """Convert features to GFNs"""
-        return [GeneralizedFuzzyNumber(val, self.fuzzify_variance) 
-                for val in X]
+    def _fuzzify_features(self, X, crisp=False):
+        """Convert features to GFNs; crisp=True keeps observation means fixed (IWFR BLiR backbone path)."""
+        if crisp:
+            return [GeneralizedFuzzyNumber(val, 0.0) for val in X]
+        return [GeneralizedFuzzyNumber(val, self.fuzzify_variance) for val in X]
+
+    def _fuzzy_predict_on_linear_features(self, X_arr, include_residual_uncertainty=False, crisp_inputs=False):
+        """GFN inference on linear features only (same space as BLiR)."""
+        predictions = []
+        for i in range(X_arr.shape[0]):
+            y_gfn = self.intercept
+            x_gfns = self._fuzzify_features(X_arr[i, :], crisp=crisp_inputs)
+            for beta_gfn, x_gfn in zip(self.coefficients, x_gfns):
+                product = GeneralizedFuzzyNumber.multiply(
+                    beta_gfn, x_gfn, symmetry_threshold=self.symmetry_threshold
+                )
+                y_gfn = GeneralizedFuzzyNumber.add(y_gfn, product)
+            if include_residual_uncertainty and self.sigma_gfn is not None:
+                y_gfn = GeneralizedFuzzyNumber.add(y_gfn, self.sigma_gfn)
+            max_adj = 0.0 if crisp_inputs else 0.75
+            predictions.append(
+                y_gfn.defuzzify(
+                    m=self.m,
+                    small_delta_threshold=self.small_delta_threshold,
+                    max_mean_adjustment=max_adj,
+                )
+            )
+        return np.asarray(predictions, dtype=float)
     
     def predict(self, X, input_prescaled=False, include_residual_uncertainty=False, linear_only=False):
         """
@@ -406,13 +476,25 @@ class FuzzyBayesianRegression:
         """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
+
+        X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
+
+        if getattr(self, "blir_backbone_", None) is not None:
+            y_blir = np.asarray(self.blir_backbone_.predict(X_scaled), dtype=float).ravel()
+            if linear_only:
+                return y_blir
+            y_fuzzy = self._fuzzy_predict_on_linear_features(
+                X_scaled,
+                include_residual_uncertainty=include_residual_uncertainty,
+                crisp_inputs=True,
+            )
+            gfn_weight = min(0.12, max(0.02, float(self.m) * 0.5))
+            return (1.0 - gfn_weight) * y_blir + gfn_weight * y_fuzzy
         
         if linear_only:
             return self._predict_linear_core(X, input_prescaled=input_prescaled)
         
-        X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
-        
-        # Add quadratic features
+        # Legacy standalone FBLiR path (quadratic + internal y scaling)
         X_augmented = self._add_quadratic_features(X_scaled)
         X_augmented = np.clip(X_augmented, -1e8, 1e8)
         

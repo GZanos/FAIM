@@ -1295,8 +1295,17 @@ def _fblir_supports_prescaled(model):
         return False
 
 
-def _fblir_fit_model(model, X_scaled, y, X_raw):
+def _fblir_fit_model(model, X_scaled, y, X_raw, blir_model=None):
     """Fit FBLiR with scaled features when supported; otherwise unscaled once (legacy module)."""
+    model._iwfr_fblir_backbone = False
+    if blir_model is not None and hasattr(model, "fit_with_blir_backbone"):
+        try:
+            model.fit_with_blir_backbone(blir_model, X_scaled, y, input_prescaled=True)
+            model._iwfr_uses_prescaled = True
+            model._iwfr_fblir_backbone = True
+            return model
+        except TypeError:
+            pass
     if _fblir_supports_prescaled(model):
         model.fit(X_scaled, y, input_prescaled=True)
         model._iwfr_uses_prescaled = True
@@ -1366,41 +1375,43 @@ def _stabilize_fblir_recursive_prediction(
     return float(np.clip(pred, linear_z_lo, linear_z_hi))
 
 
-def _auto_tune_fblir_params(X_scaled, y, X_raw, base_params, holdout_days=21):
-    """Light grid search for FBLiR GFN + ridge settings (one-step holdout)."""
+def _auto_tune_fblir_params(X_scaled, y, X_raw, base_params, holdout_days=21, blir_model=None):
+    """Light grid search for FBLiR GFN settings (one-step holdout, BLiR backbone fixed)."""
     params = dict(base_params or {})
     y_arr = np.asarray(y, dtype=float).ravel()
     holdout = int(max(14, min(holdout_days, len(y_arr) // 4)))
     if len(y_arr) < holdout + 40 or not FBLIR_AVAILABLE or FuzzyBayesianRegression is None:
         return params, None
 
+    if blir_model is None:
+        blir_model = _build_blir_regressor({})
+        blir_model.fit(X_scaled.iloc[:-holdout], y_arr[:-holdout])
+
     X_tr_s, X_ho_s = X_scaled.iloc[:-holdout], X_scaled.iloc[-holdout:]
     X_tr_r, X_ho_r = X_raw.iloc[:-holdout], X_raw.iloc[-holdout:]
     y_tr, y_ho = y_arr[:-holdout], y_arr[-holdout:]
 
-    m_vals = [0.05, 0.1, 0.2]
-    fuzz_vals = [0.03, 0.05, 0.08]
-    tau_vals = [0.5, 1.0, 2.0]
+    m_vals = [0.05, 0.1, 0.15]
+    fuzz_vals = [0.02, 0.05, 0.08]
 
     best_mae = float("inf")
     best = params
     for m_val in m_vals:
         for fuzz_val in fuzz_vals:
-            for tau_val in tau_vals:
-                trial = dict(params)
-                trial.update({"m": m_val, "fuzzification_factor": fuzz_val, "tau": tau_val})
-                try:
-                    model = _build_fblir_regressor(trial)
-                    _fblir_fit_model(model, X_tr_s, y_tr, X_tr_r)
-                    pred = _fblir_predict_values(model, X_ho_s, X_ho_r, linear_only=True)
-                    mae = float(np.mean(np.abs(y_ho - pred)))
-                    if np.isfinite(mae) and mae < best_mae:
-                        best_mae = mae
-                        best = trial
-                except Exception:
-                    continue
+            trial = dict(params)
+            trial.update({"m": m_val, "fuzzification_factor": fuzz_val})
+            try:
+                model = _build_fblir_regressor(trial)
+                _fblir_fit_model(model, X_tr_s, y_tr, X_tr_r, blir_model=blir_model)
+                pred = _fblir_predict_values(model, X_ho_s, X_ho_r, linear_only=False)
+                mae = float(np.mean(np.abs(y_ho - pred)))
+                if np.isfinite(mae) and mae < best_mae:
+                    best_mae = mae
+                    best = trial
+            except Exception:
+                continue
 
-    note = f"FBLiR auto-tuned on last {holdout} days (holdout MAE={best_mae:.4f})."
+    note = f"FBLiR GFN auto-tuned on last {holdout} days (holdout MAE={best_mae:.4f}, BLiR core fixed)."
     return best, note
 
 
@@ -2224,10 +2235,18 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
     if method == "FBLiR":
         params = dict(model_params.get("FBLiR") or {})
         X_raw = df_ml[list(X_scaled.columns)]
+        blr_mp = dict(model_params.get("Bayesian Linear Regression") or {})
+        blir_core = _build_blir_regressor(blr_mp)
+        blir_core.fit(X_scaled, y_arr)
         if FuzzyBayesianRegression is not None:
             m = _build_fblir_regressor(params)
-            _fblir_fit_model(m, X_scaled, y_arr, X_raw)
-            return _fblir_predict_values(m, X_scaled, X_raw)
+            _fblir_fit_model(m, X_scaled, y_arr, X_raw, blir_model=blir_core)
+            return _fblir_predict_values(
+                m,
+                X_scaled,
+                X_raw,
+                linear_only=getattr(m, "_iwfr_fblir_backbone", False),
+            )
         split_idx = int(len(X_scaled) * 0.8)
         X_train_f = X_scaled.iloc[:split_idx]
         y_train_f = pd.Series(y_arr).iloc[:split_idx]
@@ -2848,6 +2867,9 @@ def run_iterative_ml_forecast(
             raise ImportError("FBLiR is not available.")
         params = dict(model_params.get("FBLiR") or {})
         X_raw = df_ml[feature_names]
+        blr_mp = dict(model_params.get("Bayesian Linear Regression") or {})
+        blir_core = _build_blir_regressor(blr_mp)
+        blir_core.fit(X_scaled, y)
         if params.pop("auto_tune", False):
             tuned, tune_note = _auto_tune_fblir_params(
                 X_scaled,
@@ -2855,6 +2877,7 @@ def run_iterative_ml_forecast(
                 X_raw,
                 params,
                 holdout_days=int(params.pop("holdout_days", 21)),
+                blir_model=blir_core,
             )
             params.update(tuned)
             if tune_note:
@@ -2863,7 +2886,7 @@ def run_iterative_ml_forecast(
         burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
             model = _build_fblir_regressor(params)
-            _fblir_fit_model(model, X_scaled, y, X_raw)
+            _fblir_fit_model(model, X_scaled, y, X_raw, blir_model=blir_core)
         else:
             split_idx = int(len(X_scaled) * 0.8)
             X_train_f = X_scaled.iloc[:split_idx]
@@ -2883,16 +2906,7 @@ def run_iterative_ml_forecast(
         raise ValueError(f"Unknown iterative ML method: {method}")
 
     is_fblir = method == "FBLiR"
-    fblir_roll_std_caps = {}
-    if is_fblir:
-        for window in [3, 7, 14]:
-            std_col = f"{forecast_target}_rolling_std_{window}"
-            if std_col in feature_names and std_col in df_ml.columns:
-                cap = float(df_ml[std_col].replace([np.inf, -np.inf], np.nan).median())
-                if np.isfinite(cap) and cap > 0:
-                    fblir_roll_std_caps[std_col] = cap * 1.35
-
-    prev_fblir_pred = float(y.iloc[-1]) if is_fblir and len(y) else None
+    fblir_uses_backbone = is_fblir and getattr(model, "_iwfr_fblir_backbone", False)
 
     for step_idx in range(forecast_horizon):
         next_date = current_data["date"].iloc[-1] + timedelta(days=1)
@@ -2909,7 +2923,7 @@ def run_iterative_ml_forecast(
         )
         if is_fblir:
             pred = float(
-                _fblir_predict_values(model, last_row_scaled, last_row, linear_only=True)[0]
+                _fblir_predict_values(model, last_row_scaled, last_row, linear_only=fblir_uses_backbone)[0]
             )
         else:
             pred = predict_one(last_row_scaled)
@@ -2919,24 +2933,13 @@ def run_iterative_ml_forecast(
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
             pred = 0.86 * pred + 0.14 * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
-        elif method == "Bayesian Linear Regression":
+        elif method in ("Bayesian Linear Regression", "FBLiR"):
             if seasonal_ref is not None:
                 pred = 0.58 * pred + 0.42 * seasonal_ref
             tail_z = current_data[forecast_target].tail(14)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
             pred = 0.92 * pred + 0.08 * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
-        elif method == "FBLiR":
-            pred = _stabilize_fblir_recursive_prediction(
-                pred,
-                seasonal_ref,
-                prev_fblir_pred,
-                step_idx,
-                forecast_horizon,
-                linear_z_lo,
-                linear_z_hi,
-            )
-            prev_fblir_pred = pred
         predictions.append(pred)
 
         new_date = next_date
@@ -2970,8 +2973,6 @@ def run_iterative_ml_forecast(
             if std_col in feature_names:
                 recent_values = list(current_data[forecast_target].tail(window - 1)) + [pred]
                 std_val = np.std(recent_values) if len(recent_values) > 1 else 0.0
-                if is_fblir and std_col in fblir_roll_std_caps:
-                    std_val = min(float(std_val), fblir_roll_std_caps[std_col])
                 new_row[std_col] = std_val
         current_data = pd.concat([current_data, pd.DataFrame([new_row])], ignore_index=True)
 
