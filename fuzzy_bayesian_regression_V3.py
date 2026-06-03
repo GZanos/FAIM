@@ -373,12 +373,25 @@ class FuzzyBayesianRegression:
         self.is_fitted = True
         return self
     
+    def _predict_linear_core(self, X, input_prescaled=False):
+        """Stable point predictions from posterior mean (used for multi-step forecasting)."""
+        X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
+        X_augmented = self._add_quadratic_features(X_scaled)
+        X_augmented = np.clip(X_augmented, -1e8, 1e8)
+        if self.posterior_mean_coef_ is None:
+            raise ValueError("Model missing posterior mean coefficients.")
+        y_scaled = np.asarray(X_augmented @ self.posterior_mean_coef_, dtype=float).reshape(-1, 1)
+        return self.scaler_y.inverse_transform(y_scaled).ravel()
+
+    def predict_linear_mean(self, X, input_prescaled=False):
+        return self._predict_linear_core(X, input_prescaled=input_prescaled)
+    
     def _fuzzify_features(self, X):
         """Convert features to GFNs"""
         return [GeneralizedFuzzyNumber(val, self.fuzzify_variance) 
                 for val in X]
     
-    def predict(self, X, input_prescaled=False, include_residual_uncertainty=False):
+    def predict(self, X, input_prescaled=False, include_residual_uncertainty=False, linear_only=False):
         """
         Make predictions using fuzzy arithmetic
         
@@ -386,12 +399,16 @@ class FuzzyBayesianRegression:
         - X: Feature matrix (n_samples, n_features)
         - input_prescaled: True when X is already standardized (IWFR app path)
         - include_residual_uncertainty: add residual GFN at predict time (off for forecasting)
+        - linear_only: skip fuzzy layer (stable recursive multi-step forecasts)
         
         Returns:
         - predictions: numpy array of predictions
         """
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
+        
+        if linear_only:
+            return self._predict_linear_core(X, input_prescaled=input_prescaled)
         
         X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
         
@@ -426,7 +443,7 @@ class FuzzyBayesianRegression:
 
             if self.posterior_mean_coef_ is not None:
                 linear_pred = float(X_augmented[i, :] @ self.posterior_mean_coef_)
-                y_pred_scaled = 0.82 * y_pred_scaled + 0.18 * linear_pred
+                y_pred_scaled = 0.55 * y_pred_scaled + 0.45 * linear_pred
             
             predictions.append(y_pred_scaled)
         

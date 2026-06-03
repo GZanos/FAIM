@@ -1306,16 +1306,64 @@ def _fblir_fit_model(model, X_scaled, y, X_raw):
     return model
 
 
-def _fblir_predict_values(model, X_scaled, X_raw=None):
+def _fblir_predict_values(model, X_scaled, X_raw=None, linear_only=False):
     """Predict with FBLiR; compatible with legacy modules lacking input_prescaled."""
-    if getattr(model, "_iwfr_uses_prescaled", _fblir_supports_prescaled(model)):
+    use_prescaled = getattr(model, "_iwfr_uses_prescaled", _fblir_supports_prescaled(model))
+    X_in = X_scaled if use_prescaled else (X_raw if X_raw is not None else X_scaled)
+
+    if linear_only:
+        if hasattr(model, "predict_linear_mean"):
+            try:
+                return np.asarray(
+                    model.predict_linear_mean(X_in, input_prescaled=use_prescaled),
+                    dtype=float,
+                ).ravel()
+            except TypeError:
+                return np.asarray(model.predict_linear_mean(X_in), dtype=float).ravel()
         try:
-            return np.asarray(model.predict(X_scaled, input_prescaled=True), dtype=float).ravel()
+            return np.asarray(
+                model.predict(X_in, input_prescaled=use_prescaled, linear_only=True),
+                dtype=float,
+            ).ravel()
         except TypeError:
-            return np.asarray(model.predict(X_scaled), dtype=float).ravel()
+            pass
+
+    if use_prescaled:
+        try:
+            return np.asarray(model.predict(X_in, input_prescaled=True), dtype=float).ravel()
+        except TypeError:
+            return np.asarray(model.predict(X_in), dtype=float).ravel()
     if X_raw is None:
         X_raw = X_scaled
     return np.asarray(model.predict(X_raw), dtype=float).ravel()
+
+
+def _stabilize_fblir_recursive_prediction(
+    pred,
+    seasonal_ref,
+    prev_pred,
+    step_idx,
+    forecast_horizon,
+    linear_z_lo,
+    linear_z_hi,
+):
+    """Tame FBLiR recursive drift: more seasonal anchoring and step-to-step limits later in the horizon."""
+    pred = float(pred)
+    if not np.isfinite(pred):
+        pred = float(prev_pred) if prev_pred is not None and np.isfinite(prev_pred) else pred
+
+    if seasonal_ref is not None and np.isfinite(seasonal_ref):
+        horizon = max(int(forecast_horizon), 1)
+        progress = float(step_idx) / float(max(horizon - 1, 1))
+        w_season = min(0.72, 0.38 + 0.34 * progress)
+        pred = (1.0 - w_season) * pred + w_season * float(seasonal_ref)
+
+    if prev_pred is not None and np.isfinite(prev_pred):
+        span = max(abs(prev_pred), 1.0)
+        max_delta = max(0.35, 0.12 * span)
+        pred = float(np.clip(pred, prev_pred - max_delta, prev_pred + max_delta))
+
+    return float(np.clip(pred, linear_z_lo, linear_z_hi))
 
 
 def _auto_tune_fblir_params(X_scaled, y, X_raw, base_params, holdout_days=21):
@@ -1344,7 +1392,7 @@ def _auto_tune_fblir_params(X_scaled, y, X_raw, base_params, holdout_days=21):
                 try:
                     model = _build_fblir_regressor(trial)
                     _fblir_fit_model(model, X_tr_s, y_tr, X_tr_r)
-                    pred = _fblir_predict_values(model, X_ho_s, X_ho_r)
+                    pred = _fblir_predict_values(model, X_ho_s, X_ho_r, linear_only=True)
                     mae = float(np.mean(np.abs(y_ho - pred)))
                     if np.isfinite(mae) and mae < best_mae:
                         best_mae = mae
@@ -2816,9 +2864,6 @@ def run_iterative_ml_forecast(
         if FuzzyBayesianRegression is not None:
             model = _build_fblir_regressor(params)
             _fblir_fit_model(model, X_scaled, y, X_raw)
-
-            def predict_one(row_scaled_df, row_raw_df):
-                return float(_fblir_predict_values(model, row_scaled_df, row_raw_df)[0])
         else:
             split_idx = int(len(X_scaled) * 0.8)
             X_train_f = X_scaled.iloc[:split_idx]
@@ -2834,15 +2879,22 @@ def run_iterative_ml_forecast(
             except TypeError:
                 model.fit(X_train_r, y_train_f, X_raw.iloc[split_idx:], y_val_f)
                 model._iwfr_uses_prescaled = False
-
-            def predict_one(row_scaled_df, row_raw_df):
-                return float(_fblir_predict_values(model, row_scaled_df, row_raw_df)[0])
     else:
         raise ValueError(f"Unknown iterative ML method: {method}")
 
     is_fblir = method == "FBLiR"
+    fblir_roll_std_caps = {}
+    if is_fblir:
+        for window in [3, 7, 14]:
+            std_col = f"{forecast_target}_rolling_std_{window}"
+            if std_col in feature_names and std_col in df_ml.columns:
+                cap = float(df_ml[std_col].replace([np.inf, -np.inf], np.nan).median())
+                if np.isfinite(cap) and cap > 0:
+                    fblir_roll_std_caps[std_col] = cap * 1.35
 
-    for _step in range(forecast_horizon):
+    prev_fblir_pred = float(y.iloc[-1]) if is_fblir and len(y) else None
+
+    for step_idx in range(forecast_horizon):
         next_date = current_data["date"].iloc[-1] + timedelta(days=1)
         seasonal_ref = _seasonal_target_reference(df_ml, forecast_target, next_date)
 
@@ -2856,7 +2908,9 @@ def run_iterative_ml_forecast(
             columns=feature_names,
         )
         if is_fblir:
-            pred = predict_one(last_row_scaled, last_row)
+            pred = float(
+                _fblir_predict_values(model, last_row_scaled, last_row, linear_only=True)[0]
+            )
         else:
             pred = predict_one(last_row_scaled)
 
@@ -2873,14 +2927,16 @@ def run_iterative_ml_forecast(
             pred = 0.92 * pred + 0.08 * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         elif method == "FBLiR":
-            if seasonal_ref is not None:
-                pred = 0.55 * pred + 0.45 * seasonal_ref
-            tail_z = current_data[forecast_target].tail(14)
-            anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            pred = 0.90 * pred + 0.10 * anchor
-            if not np.isfinite(pred):
-                pred = float(current_data[forecast_target].iloc[-1])
-            pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
+            pred = _stabilize_fblir_recursive_prediction(
+                pred,
+                seasonal_ref,
+                prev_fblir_pred,
+                step_idx,
+                forecast_horizon,
+                linear_z_lo,
+                linear_z_hi,
+            )
+            prev_fblir_pred = pred
         predictions.append(pred)
 
         new_date = next_date
@@ -2913,7 +2969,10 @@ def run_iterative_ml_forecast(
                 new_row[mean_col] = np.mean(recent_values)
             if std_col in feature_names:
                 recent_values = list(current_data[forecast_target].tail(window - 1)) + [pred]
-                new_row[std_col] = np.std(recent_values) if len(recent_values) > 1 else 0
+                std_val = np.std(recent_values) if len(recent_values) > 1 else 0.0
+                if is_fblir and std_col in fblir_roll_std_caps:
+                    std_val = min(float(std_val), fblir_roll_std_caps[std_col])
+                new_row[std_col] = std_val
         current_data = pd.concat([current_data, pd.DataFrame([new_row])], ignore_index=True)
 
     return np.array(predictions, dtype=float)
