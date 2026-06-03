@@ -20,7 +20,7 @@ import re
 from pathlib import Path
 
 import streamlit.components.v1 as components
-from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.linear_model import ARDRegression, LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
@@ -1209,7 +1209,22 @@ def _apply_stl_target_smoothing(y, dates):
     except Exception:
         return np.asarray(y, dtype=float), "Target smoothing: STL failed; left target unchanged."
 
-def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3):
+def _build_blir_regressor(params=None):
+    """ARDRegression — stable BLiR path used before paper-prior experiment."""
+    params = params or {}
+    return ARDRegression(
+        alpha_1=float(params.get("alpha_1", 1e-6)),
+        alpha_2=float(params.get("alpha_2", 1e-6)),
+        lambda_1=float(params.get("lambda_1", 1e-6)),
+        lambda_2=float(params.get("lambda_2", 1e-6)),
+        max_iter=700,
+        tol=1e-4,
+        threshold_lambda=1e12,
+        compute_score=False,
+    )
+
+
+def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3, deterministic=False):
     """
     ✨ NEW FUNCTION: Get feature value for a future date based on historical seasonal patterns
     This ensures features follow their natural seasonality in forecasts
@@ -1235,10 +1250,10 @@ def get_seasonal_feature_value(historical_data, feature_name, target_date, lookb
     ]
     
     if len(matching_rows) > 0 and feature_name in matching_rows.columns:
-        # Use the mean of matching historical values
-        seasonal_value = matching_rows[feature_name].mean()
-        
-        # Add small random variation (±5%) for realism
+        seasonal_value = float(matching_rows[feature_name].mean())
+        if deterministic:
+            return seasonal_value
+        # Small random variation (±5%) for realism in exploratory runs only.
         variation = np.random.normal(0, abs(seasonal_value) * 0.05)
         return seasonal_value + variation
     else:
@@ -1989,7 +2004,7 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Bayesian Linear Regression":
         mp = model_params.get("Bayesian Linear Regression") or {}
-        m = ConjugateBayesianLinearRegression.from_params(mp)
+        m = _build_blir_regressor(mp)
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Random Forest":
@@ -2028,20 +2043,19 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "FBLiR":
         params = model_params.get("FBLiR") or {}
-        X_raw = df_ml[list(X_scaled.columns)]
         if FuzzyBayesianRegression is not None:
             m = _build_fblir_regressor(params)
-            m.fit(X_raw, y_arr)
-            return np.asarray(m.predict(X_raw), dtype=float).ravel()
+            m.fit(X_scaled, y_arr, input_prescaled=True)
+            return np.asarray(m.predict(X_scaled, input_prescaled=True), dtype=float).ravel()
         split_idx = int(len(X_scaled) * 0.8)
-        X_train_f = X_raw.iloc[:split_idx]
+        X_train_f = X_scaled.iloc[:split_idx]
         y_train_f = pd.Series(y_arr).iloc[:split_idx]
-        X_val_f = X_raw.iloc[split_idx:]
+        X_val_f = X_scaled.iloc[split_idx:]
         y_val_f = pd.Series(y_arr).iloc[split_idx:]
         base_samples = min(max(100, int(params.get("adapt_steps", 200)) + int(params.get("burnin_steps", 200))), 1500)
         m = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
         m.fit(X_train_f, y_train_f, X_val_f, y_val_f)
-        return np.asarray(m.predict(X_raw), dtype=float).ravel()
+        return np.asarray(m.predict(X_scaled, input_prescaled=True), dtype=float).ravel()
     if method == "Prophet":
         df_prophet = df_ml[["date", forecast_target]].copy()
         df_prophet.columns = ["ds", "y"]
@@ -2587,7 +2601,7 @@ def run_iterative_ml_forecast(
 
     elif method == "Bayesian Linear Regression":
         mp = model_params.get("Bayesian Linear Regression") or {}
-        model = ConjugateBayesianLinearRegression.from_params(mp)
+        model = _build_blir_regressor(mp)
         model.fit(X_scaled, y)
 
         def predict_one(row_scaled_df):
@@ -2640,33 +2654,32 @@ def run_iterative_ml_forecast(
         if not FBLIR_AVAILABLE:
             raise ImportError("FBLiR is not available.")
         params = model_params.get("FBLiR") or {}
-        X_raw = df_ml[feature_names]
         adapt = int(params.get("adapt_steps", 200))
         burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
             model = _build_fblir_regressor(params)
-            model.fit(X_raw, y)
+            model.fit(X_scaled, y, input_prescaled=True)
 
-            def predict_one(row_df):
-                pr = model.predict(row_df)
+            def predict_one(row_scaled_df):
+                pr = model.predict(row_scaled_df, input_prescaled=True)
                 return float(np.asarray(pr).ravel()[0])
         else:
-            split_idx = int(len(X_raw) * 0.8)
-            X_train_f = X_raw.iloc[:split_idx]
+            split_idx = int(len(X_scaled) * 0.8)
+            X_train_f = X_scaled.iloc[:split_idx]
             y_train_f = y.iloc[:split_idx]
-            X_val_f = X_raw.iloc[split_idx:]
+            X_val_f = X_scaled.iloc[split_idx:]
             y_val_f = y.iloc[split_idx:]
             base_samples = min(max(100, adapt + burnin), 1500)
             model = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
-            model.fit(X_train_f, y_train_f, X_val_f, y_val_f)
+            model.fit(X_train_f, y_train_f, X_val_f, y_val_f, input_prescaled=True)
 
-            def predict_one(row_df):
-                pr = model.predict(row_df)
+            def predict_one(row_scaled_df):
+                pr = model.predict(row_scaled_df, input_prescaled=True)
                 return float(np.asarray(pr).ravel()[0])
     else:
         raise ValueError(f"Unknown iterative ML method: {method}")
 
-    use_fblir_raw = method == "FBLiR"
+    use_fblir_raw = False
 
     for _step in range(forecast_horizon):
         last_row = current_data.iloc[[-1]][feature_names]
@@ -2690,6 +2703,9 @@ def run_iterative_ml_forecast(
             pred = (1.0 - mix) * pred + mix * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
         elif method == "FBLiR":
+            tail_z = current_data[forecast_target].tail(21)
+            anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
+            pred = 0.88 * pred + 0.12 * anchor
             if not np.isfinite(pred):
                 pred = float(current_data[forecast_target].iloc[-1])
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
@@ -2708,6 +2724,7 @@ def run_iterative_ml_forecast(
                 historical_data=df_ml,
                 feature_name=feat,
                 target_date=new_date,
+                deterministic=True,
             )
         for lag in range(1, 8):
             lag_col = f"{forecast_target}_lag_{lag}"
@@ -2919,30 +2936,48 @@ if data_source == "Forecasting":
 
         if "Bayesian Linear Regression" in forecast_methods:
             st.markdown("**Bayesian Linear Regression**")
-            st.markdown("**Bayesian prior hyperparameters:**")
-            blr_tau = st.number_input(
-                "tau (prior std for slopes β_j)",
-                min_value=1e-4,
-                max_value=100.0,
-                value=1.0,
-                step=0.1,
-                format="%.4f",
-                key="blr_tau",
-                help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (slopes).",
+            st.markdown("**ARD prior hyperparameters (sklearn):**")
+            blr_alpha1 = st.number_input(
+                "alpha_1",
+                min_value=1e-10,
+                max_value=1.0,
+                value=1e-6,
+                format="%.2e",
+                key="blr_alpha1",
+                help="Shape parameter for the Gamma prior on inverse noise precision.",
             )
-            blr_sigma0 = st.number_input(
-                "sigma_0_squared (prior variance for intercept β_0)",
-                min_value=1e-6,
-                max_value=100.0,
-                value=1.0,
-                step=0.1,
-                format="%.4f",
-                key="blr_sigma0",
-                help="Prior: β_0 ~ N(0, σ₀²).",
+            blr_alpha2 = st.number_input(
+                "alpha_2",
+                min_value=1e-10,
+                max_value=1.0,
+                value=1e-6,
+                format="%.2e",
+                key="blr_alpha2",
+                help="Rate parameter for the Gamma prior on inverse noise precision.",
+            )
+            blr_lambda1 = st.number_input(
+                "lambda_1",
+                min_value=1e-10,
+                max_value=1.0,
+                value=1e-6,
+                format="%.2e",
+                key="blr_lambda1",
+                help="Shape parameter for the Gamma prior on weight precisions.",
+            )
+            blr_lambda2 = st.number_input(
+                "lambda_2",
+                min_value=1e-10,
+                max_value=1.0,
+                value=1e-6,
+                format="%.2e",
+                key="blr_lambda2",
+                help="Rate parameter for the Gamma prior on weight precisions.",
             )
             model_params["Bayesian Linear Regression"] = {
-                "tau": float(blr_tau),
-                "sigma_0_squared": float(blr_sigma0),
+                "alpha_1": float(blr_alpha1),
+                "alpha_2": float(blr_alpha2),
+                "lambda_1": float(blr_lambda1),
+                "lambda_2": float(blr_lambda2),
             }
         
         if 'Gradient Boosting' in forecast_methods:

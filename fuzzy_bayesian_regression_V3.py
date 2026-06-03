@@ -225,18 +225,10 @@ class GeneralizedFuzzyNumber:
             return np.inf if self.mean != 0 else 0.0
         return abs(self.mean / np.sqrt(self.variance))
     
-    def defuzzify(self, m=0.1, small_delta_threshold=0.4):
+    def defuzzify(self, m=0.1, small_delta_threshold=0.4, max_mean_adjustment=0.75):
         """
         Defuzzification using optimal m parameter and smallDelta threshold
         Based on the R code defuzzification approach
-        
-        Parameters:
-        - m: adjustment magnitude (optimal value typically around 0.1-0.3)
-        - small_delta_threshold: threshold for delta = mean/sqrt(variance) (default 0.4)
-        
-        Returns:
-        - predicted value using: mean + m * variance (if delta < threshold)
-        - or just mean (if delta >= threshold)
         """
         if self.variance <= 0:
             return self.mean
@@ -244,11 +236,8 @@ class GeneralizedFuzzyNumber:
         delta = self.get_delta()
         
         if delta < small_delta_threshold:
-            # Use adjustment: mean + m * variance
-            return self.mean + m * self.variance
-        else:
-            # Use just mean
-            return self.mean
+            return self.mean + min(float(m) * self.variance, float(max_mean_adjustment))
+        return self.mean
 
 
 class FuzzyBayesianRegression:
@@ -297,38 +286,42 @@ class FuzzyBayesianRegression:
         self.scaler_y = StandardScaler()
         self.coefficients = None
         self.intercept = None
+        self.sigma_gfn = None
+        self.posterior_mean_coef_ = None
         self.is_fitted = False
         
     def _bayesian_inference(self, X, y):
         """
-        Conjugate Gaussian inference: beta_0 ~ N(0, sigma_0^2), beta_j ~ N(0, tau^2).
+        Ridge-style Gaussian posterior on scaled features (zero intercept; y is scaled).
+        Matches the pre-2025 FBLiR model-fit layer used in IWFR.
         """
         n, p = X.shape
-        samples = posterior_linear_samples(
-            X,
-            y,
-            n_samples=self.n_samples,
-            tau=self.tau,
-            sigma_0_squared=self.sigma_0_squared,
-        )
-        # samples columns: [beta_0, beta_1, ..., beta_p] for design [1, X]
-        intercept_mean = float(np.mean(samples[:, 0]))
-        intercept_var = float(np.var(samples[:, 0]))
-        intercept_gfn = GeneralizedFuzzyNumber(intercept_mean, max(intercept_var, 1e-12))
+        y = np.asarray(y, dtype=float).ravel()
+        lambda_prior = 1.0 / max(float(self.tau) ** 2, 1e-8)
+
+        prior_prec = np.eye(p, dtype=float) * lambda_prior
+        sigma_squared = float(max(np.var(y), 1e-12))
+        prec_post = (X.T @ X) / sigma_squared + prior_prec
+        prec_post = prec_post + np.eye(p, dtype=float) * 1e-10
+        cov_post = np.linalg.inv(prec_post)
+        mean_post = cov_post @ (X.T @ y / sigma_squared)
+
+        rng = np.random.default_rng(42)
+        samples = rng.multivariate_normal(mean_post, cov_post, size=int(max(1, self.n_samples)))
+
+        intercept_gfn = GeneralizedFuzzyNumber(0.0, 1e-12)
+        self.posterior_mean_coef_ = mean_post.copy()
 
         beta_gfns = []
         for j in range(p):
-            col = j + 1
-            beta_mean = float(np.mean(samples[:, col]))
-            beta_var = float(np.var(samples[:, col]))
+            beta_mean = float(np.mean(samples[:, j]))
+            beta_var = float(np.var(samples[:, j]))
             beta_var = beta_var * self.uncertainty_weight + (
                 (1 - self.uncertainty_weight) * float(np.mean(np.var(samples, axis=0)))
             )
             beta_gfns.append(GeneralizedFuzzyNumber(beta_mean, max(beta_var, 1e-12)))
 
-        mean_coef = np.mean(samples, axis=0)
-        Xd = np.column_stack([np.ones(n, dtype=float), X])
-        y_hat = Xd @ mean_coef
+        y_hat = X @ mean_post
         sigma_squared = float(max(np.var(y - y_hat), 1e-12))
         sigma_gfn = GeneralizedFuzzyNumber(0.0, sigma_squared)
 
@@ -341,17 +334,32 @@ class FuzzyBayesianRegression:
             return np.hstack([X, X_quad])
         return X
     
-    def fit(self, X, y):
+    def _scale_features(self, X, fit=False, input_prescaled=False):
+        X_arr = sanitize_float_matrix(X)
+        if input_prescaled:
+            n_feat = X_arr.shape[1]
+            if fit:
+                self.scaler_X.mean_ = np.zeros(n_feat, dtype=float)
+                self.scaler_X.scale_ = np.ones(n_feat, dtype=float)
+                self.scaler_X.var_ = np.ones(n_feat, dtype=float)
+                self.scaler_X.n_features_in_ = n_feat
+                self.scaler_X.n_samples_seen_ = int(X_arr.shape[0])
+            return X_arr
+        if fit:
+            return self.scaler_X.fit_transform(X_arr)
+        return self.scaler_X.transform(X_arr)
+
+    def fit(self, X, y, input_prescaled=False):
         """
         Fit Fuzzy Bayesian regression model
         
         Parameters:
         - X: Feature matrix (n_samples, n_features)
         - y: Target vector (n_samples,)
+        - input_prescaled: True when X is already standardized (IWFR app path)
         """
-        X_arr = sanitize_float_matrix(X)
         y_arr = sanitize_float_vector(y)
-        X_scaled = self.scaler_X.fit_transform(X_arr)
+        X_scaled = self._scale_features(X, fit=True, input_prescaled=input_prescaled)
         y_scaled = self.scaler_y.fit_transform(_ensure_2d_array(y_arr)).ravel()
         
         # Add quadratic features
@@ -370,12 +378,14 @@ class FuzzyBayesianRegression:
         return [GeneralizedFuzzyNumber(val, self.fuzzify_variance) 
                 for val in X]
     
-    def predict(self, X):
+    def predict(self, X, input_prescaled=False, include_residual_uncertainty=False):
         """
         Make predictions using fuzzy arithmetic
         
         Parameters:
         - X: Feature matrix (n_samples, n_features)
+        - input_prescaled: True when X is already standardized (IWFR app path)
+        - include_residual_uncertainty: add residual GFN at predict time (off for forecasting)
         
         Returns:
         - predictions: numpy array of predictions
@@ -383,8 +393,7 @@ class FuzzyBayesianRegression:
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
         
-        X_arr = sanitize_float_matrix(X)
-        X_scaled = self.scaler_X.transform(X_arr)
+        X_scaled = self._scale_features(X, fit=False, input_prescaled=input_prescaled)
         
         # Add quadratic features
         X_augmented = self._add_quadratic_features(X_scaled)
@@ -407,15 +416,17 @@ class FuzzyBayesianRegression:
                 )
                 y_gfn = GeneralizedFuzzyNumber.add(y_gfn, product)
             
-            # Add residual uncertainty
-            y_gfn = GeneralizedFuzzyNumber.add(y_gfn, self.sigma_gfn)
+            if include_residual_uncertainty and self.sigma_gfn is not None:
+                y_gfn = GeneralizedFuzzyNumber.add(y_gfn, self.sigma_gfn)
             
-            # Defuzzify using Gaussian Fuzzy Number defuzzification
-            # Uses m parameter and small_delta_threshold based on R code
             y_pred_scaled = y_gfn.defuzzify(
                 m=self.m, 
                 small_delta_threshold=self.small_delta_threshold
             )
+
+            if self.posterior_mean_coef_ is not None:
+                linear_pred = float(X_augmented[i, :] @ self.posterior_mean_coef_)
+                y_pred_scaled = 0.82 * y_pred_scaled + 0.18 * linear_pred
             
             predictions.append(y_pred_scaled)
         
@@ -436,7 +447,7 @@ class FuzzyBayesianRegressionTuned(FuzzyBayesianRegression):
         self.verbose = verbose
         self.best_params = None
         
-    def fit(self, X, y, X_val=None, y_val=None):
+    def fit(self, X, y, X_val=None, y_val=None, input_prescaled=False):
         """
         Fit with hyperparameter tuning
         
@@ -485,8 +496,8 @@ class FuzzyBayesianRegressionTuned(FuzzyBayesianRegression):
                                 )
                                 
                                 # Fit and evaluate
-                                model.fit(X, y)
-                                y_pred = model.predict(X_val)
+                                model.fit(X, y, input_prescaled=input_prescaled)
+                                y_pred = model.predict(X_val, input_prescaled=input_prescaled)
                                 mae = np.mean(np.abs(y_val - y_pred))
                                 
                                 if mae < best_mae:
@@ -528,7 +539,7 @@ class FuzzyBayesianRegressionTuned(FuzzyBayesianRegression):
         self.fuzzify_variance = best_params['fuzzify_variance']
         self.uncertainty_weight = best_params['uncertainty_weight']
         
-        super().fit(X, y)
+        super().fit(X, y, input_prescaled=input_prescaled)
         return self
 
 
