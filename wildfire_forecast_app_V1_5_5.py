@@ -52,12 +52,20 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
             # FBLiR is optional - app will work without it
             # Note: Ensure fuzzy_bayesian_regression_V3.py (or V2/original) is in the same directory
 
-from bayesian_linear_core import (
-    ConjugateBayesianLinearRegression,
-    parse_tau_sigma_0_params,
-    sanitize_float_matrix,
-    sanitize_float_vector,
-)
+try:
+    from bayesian_linear_core import (
+        ConjugateBayesianLinearRegression,
+        parse_tau_sigma_0_params,
+        sanitize_float_matrix,
+        sanitize_float_vector,
+    )
+except ImportError:
+    from fuzzy_bayesian_regression_V3 import (
+        ConjugateBayesianLinearRegression,
+        parse_tau_sigma_0_params,
+        sanitize_float_matrix,
+        sanitize_float_vector,
+    )
 
 IWFR_DISPLAY_NAME = "Intelligent Wildfire Forecaster (IWFR)"
 

@@ -32,6 +32,114 @@ def _ensure_2d_array(a):
     return a
 # --- end helpers ---
 
+try:
+    from bayesian_linear_core import (
+        ConjugateBayesianLinearRegression,
+        parse_tau_sigma_0_params,
+        posterior_linear_samples,
+        sanitize_float_matrix,
+        sanitize_float_vector,
+    )
+except ImportError:
+    def parse_tau_sigma_0_params(params: dict | None) -> tuple[float, float]:
+        params = params or {}
+        tau = float(params.get("tau", 1.0))
+        if tau <= 0:
+            tau = 1.0
+        sigma_0_squared = float(params.get("sigma_0_squared", params.get("sigma_0_sq", 1.0)))
+        if sigma_0_squared <= 0:
+            sigma_0_squared = 1.0
+        return tau, sigma_0_squared
+
+    def _as_design_matrix(X):
+        if isinstance(X, pd.DataFrame):
+            return np.asarray(X, dtype=float)
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        return X
+
+    def sanitize_float_matrix(X, clip: float = 1e10):
+        X = _as_design_matrix(X)
+        finite = np.isfinite(X)
+        if not finite.all():
+            col_fill = np.zeros(X.shape[1], dtype=float)
+            for j in range(X.shape[1]):
+                col = X[:, j]
+                ok = np.isfinite(col)
+                col_fill[j] = float(np.median(col[ok])) if ok.any() else 0.0
+            X = np.where(finite, X, col_fill)
+        if clip is not None and clip > 0:
+            X = np.clip(X, -float(clip), float(clip))
+        return X
+
+    def sanitize_float_vector(y, clip: float = 1e10):
+        y = np.asarray(y, dtype=float).ravel()
+        ok = np.isfinite(y)
+        if not ok.all():
+            fill = float(np.median(y[ok])) if ok.any() else 0.0
+            y = np.where(ok, y, fill)
+        if clip is not None and clip > 0:
+            y = np.clip(y, -float(clip), float(clip))
+        return y
+
+    def conjugate_posterior_linear(X, y, tau: float = 1.0, sigma_0_squared: float = 1.0):
+        X = sanitize_float_matrix(X)
+        y = sanitize_float_vector(y)
+        n, p = X.shape
+        if n < 2:
+            raise ValueError("Need at least 2 samples for Bayesian linear regression.")
+        tau = max(float(tau), 1e-8)
+        sigma_0_squared = max(float(sigma_0_squared), 1e-12)
+        Xd = np.column_stack([np.ones(n, dtype=float), X])
+        prior_var = np.concatenate([[sigma_0_squared], np.full(p, tau**2, dtype=float)])
+        prior_prec = np.diag(1.0 / prior_var)
+        y_hat_init = Xd @ (np.linalg.lstsq(Xd, y, rcond=None)[0])
+        residuals = y - y_hat_init
+        sigma_squared = float(max(np.var(residuals), 1e-12))
+        prec_post = (Xd.T @ Xd) / sigma_squared + prior_prec
+        prec_post = prec_post + np.eye(prec_post.shape[0], dtype=float) * 1e-10
+        cov_post = np.linalg.inv(prec_post)
+        mean_post = cov_post @ (Xd.T @ y / sigma_squared)
+        return mean_post, cov_post, sigma_squared
+
+    def posterior_linear_samples(
+        X, y, n_samples: int, tau: float = 1.0, sigma_0_squared: float = 1.0, random_state=None
+    ):
+        mean_post, cov_post, _ = conjugate_posterior_linear(
+            X, y, tau=tau, sigma_0_squared=sigma_0_squared
+        )
+        rng = np.random.default_rng(random_state)
+        return rng.multivariate_normal(mean_post, cov_post, size=int(max(1, n_samples)))
+
+    class ConjugateBayesianLinearRegression:
+        def __init__(self, tau: float = 1.0, sigma_0_squared: float = 1.0):
+            self.tau = float(tau)
+            self.sigma_0_squared = float(sigma_0_squared)
+            self.coef_ = None
+            self.posterior_cov_ = None
+            self.sigma_squared_ = None
+
+        @classmethod
+        def from_params(cls, params: dict | None):
+            tau, sigma_0_squared = parse_tau_sigma_0_params(params)
+            return cls(tau=tau, sigma_0_squared=sigma_0_squared)
+
+        def fit(self, X, y):
+            self.coef_, self.posterior_cov_, self.sigma_squared_ = conjugate_posterior_linear(
+                X, y, tau=self.tau, sigma_0_squared=self.sigma_0_squared
+            )
+            return self
+
+        def predict(self, X):
+            if self.coef_ is None:
+                raise ValueError("Model must be fitted before predict.")
+            X = sanitize_float_matrix(X)
+            n = X.shape[0]
+            Xd = np.column_stack([np.ones(n, dtype=float), X])
+            return Xd @ self.coef_
+
+
 class GeneralizedFuzzyNumber:
     """
     Gaussian Fuzzy Number (GFN) implementation
@@ -193,8 +301,6 @@ class FuzzyBayesianRegression:
         """
         Conjugate Gaussian inference: beta_0 ~ N(0, sigma_0^2), beta_j ~ N(0, tau^2).
         """
-        from bayesian_linear_core import posterior_linear_samples
-
         n, p = X.shape
         samples = posterior_linear_samples(
             X,
@@ -241,8 +347,6 @@ class FuzzyBayesianRegression:
         - X: Feature matrix (n_samples, n_features)
         - y: Target vector (n_samples,)
         """
-        from bayesian_linear_core import sanitize_float_matrix, sanitize_float_vector
-
         X_arr = sanitize_float_matrix(X)
         y_arr = sanitize_float_vector(y)
         X_scaled = self.scaler_X.fit_transform(X_arr)
@@ -277,8 +381,6 @@ class FuzzyBayesianRegression:
         if not self.is_fitted:
             raise ValueError("Model must be fitted before prediction")
         
-        from bayesian_linear_core import sanitize_float_matrix
-
         X_arr = sanitize_float_matrix(X)
         X_scaled = self.scaler_X.transform(X_arr)
         
