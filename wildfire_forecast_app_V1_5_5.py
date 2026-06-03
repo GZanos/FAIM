@@ -26,7 +26,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, r2_score
 from statsmodels.tsa.seasonal import STL
 import warnings
-import inspect
 warnings.filterwarnings('ignore')
 
 # Try to import FBLiR (Fuzzy Bayesian Linear Regression)
@@ -53,111 +52,9 @@ except (ImportError, ModuleNotFoundError, Exception) as e:
             # FBLiR is optional - app will work without it
             # Note: Ensure fuzzy_bayesian_regression_V3.py (or V2/original) is in the same directory
 
-
-def parse_tau_sigma_0_params(params=None):
-    """Read tau and sigma_0_squared from model_params dict."""
-    params = params or {}
-    tau = float(params.get("tau", 1.0))
-    if tau <= 0:
-        tau = 1.0
-    sigma_0_squared = float(params.get("sigma_0_squared", params.get("sigma_0_sq", 1.0)))
-    if sigma_0_squared <= 0:
-        sigma_0_squared = 1.0
-    return tau, sigma_0_squared
-
-
-def _as_design_matrix(X):
-    if isinstance(X, pd.DataFrame):
-        return np.asarray(X, dtype=float)
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        X = X.reshape(-1, 1)
-    return X
-
-
-def sanitize_float_matrix(X, clip=1e10):
-    """Replace non-finite values and clip extremes for sklearn / linear algebra."""
-    X = _as_design_matrix(X)
-    finite = np.isfinite(X)
-    if not finite.all():
-        col_fill = np.zeros(X.shape[1], dtype=float)
-        for j in range(X.shape[1]):
-            col = X[:, j]
-            ok = np.isfinite(col)
-            col_fill[j] = float(np.median(col[ok])) if ok.any() else 0.0
-        X = np.where(finite, X, col_fill)
-    if clip is not None and clip > 0:
-        X = np.clip(X, -float(clip), float(clip))
-    return X
-
-
-def sanitize_float_vector(y, clip=1e10):
-    y = np.asarray(y, dtype=float).ravel()
-    ok = np.isfinite(y)
-    if not ok.all():
-        fill = float(np.median(y[ok])) if ok.any() else 0.0
-        y = np.where(ok, y, fill)
-    if clip is not None and clip > 0:
-        y = np.clip(y, -float(clip), float(clip))
-    return y
-
-
-def _conjugate_posterior_linear(X, y, tau=1.0, sigma_0_squared=1.0):
-    X = sanitize_float_matrix(X)
-    y = sanitize_float_vector(y)
-    n, p = X.shape
-    if n < 2:
-        raise ValueError("Need at least 2 samples for Bayesian linear regression.")
-    tau = max(float(tau), 1e-8)
-    sigma_0_squared = max(float(sigma_0_squared), 1e-12)
-    Xd = np.column_stack([np.ones(n, dtype=float), X])
-    prior_var = np.concatenate([[sigma_0_squared], np.full(p, tau ** 2, dtype=float)])
-    prior_prec = np.diag(1.0 / prior_var)
-    y_hat_init = Xd @ (np.linalg.lstsq(Xd, y, rcond=None)[0])
-    residuals = y - y_hat_init
-    sigma_squared = float(max(np.var(residuals), 1e-12))
-    prec_post = (Xd.T @ Xd) / sigma_squared + prior_prec
-    prec_post = prec_post + np.eye(prec_post.shape[0], dtype=float) * 1e-10
-    cov_post = np.linalg.inv(prec_post)
-    mean_post = cov_post @ (Xd.T @ y / sigma_squared)
-    return mean_post, cov_post, sigma_squared
-
-
-class ConjugateBayesianLinearRegression:
-    """Bayesian Linear Regression (BLiR) with explicit tau and sigma_0^2 priors."""
-
-    def __init__(self, tau=1.0, sigma_0_squared=1.0):
-        self.tau = float(tau)
-        self.sigma_0_squared = float(sigma_0_squared)
-        self.coef_ = None
-        self.posterior_cov_ = None
-        self.sigma_squared_ = None
-
-    @classmethod
-    def from_params(cls, params=None):
-        tau, sigma_0_squared = parse_tau_sigma_0_params(params)
-        return cls(tau=tau, sigma_0_squared=sigma_0_squared)
-
-    def fit(self, X, y):
-        self.coef_, self.posterior_cov_, self.sigma_squared_ = _conjugate_posterior_linear(
-            X, y, tau=self.tau, sigma_0_squared=self.sigma_0_squared
-        )
-        return self
-
-    def predict(self, X):
-        if self.coef_ is None:
-            raise ValueError("Model must be fitted before predict.")
-        X = sanitize_float_matrix(X)
-        n = X.shape[0]
-        Xd = np.column_stack([np.ones(n, dtype=float), X])
-        return Xd @ self.coef_
-
-
-IWFR_DISPLAY_NAME = "Intelligent Wildfire Forecaster (IWFR)"
-
 # Configure page
 st.set_page_config(
-    page_title=IWFR_DISPLAY_NAME,
+    page_title="Intelligence Wildfire Forecaster (IWFR)",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -414,7 +311,7 @@ def _render_guide_video(local_path: Path, secret_key: str, env_key: str, fallbac
 
 if hasattr(st, "dialog"):
 
-    @st.dialog(f"{IWFR_DISPLAY_NAME} — How to use", width="large")
+    @st.dialog("Intelligence Wildfire Forecaster (IWFR) — How to use", width="large")
     def faim_howto_dialog():
         c1, c2 = st.columns(2)
         with c1:
@@ -483,7 +380,7 @@ else:
         st.sidebar.warning("Upgrade Streamlit to 1.33+ for the guide popup.")
 
 # Title and description
-st.title(f"🎯 {IWFR_DISPLAY_NAME}")
+st.title("🎯 Intelligence Wildfire Forecaster (IWFR)")
 st.markdown("""
 Advanced meteorological forecasting and fire risk analysis platform.
 
@@ -1106,13 +1003,7 @@ def prepare_ml_features(df, target_col, feature_cols, lag_days=7):
     # Fill remaining NaN with forward fill then backward fill (pandas 2.2+ removed fillna(method=...))
     for col in feature_names:
         if col in df_clean.columns:
-            df_clean[col] = (
-                df_clean[col]
-                .replace([np.inf, -np.inf], np.nan)
-                .ffill()
-                .bfill()
-                .fillna(0)
-            )
+            df_clean[col] = df_clean[col].ffill().bfill().fillna(0)
     
     return df_clean, feature_names
 
@@ -1210,201 +1101,7 @@ def _apply_stl_target_smoothing(y, dates):
     except Exception:
         return np.asarray(y, dtype=float), "Target smoothing: STL failed; left target unchanged."
 
-def _build_blir_regressor(params=None):
-    """ARDRegression — stable BLiR path used before paper-prior experiment."""
-    params = params or {}
-    return ARDRegression(
-        alpha_1=float(params.get("alpha_1", 1e-6)),
-        alpha_2=float(params.get("alpha_2", 1e-6)),
-        lambda_1=float(params.get("lambda_1", 1e-6)),
-        lambda_2=float(params.get("lambda_2", 1e-6)),
-        max_iter=700,
-        tol=1e-4,
-        threshold_lambda=1e12,
-        compute_score=False,
-    )
-
-
-def _seasonal_target_reference(df_ml, forecast_target, target_date, window=12):
-    """Historical median target for the same time of year (drives seasonal recursive forecasts)."""
-    if df_ml is None or forecast_target not in df_ml.columns or "day_of_year" not in df_ml.columns:
-        return None
-    doy = int(pd.Timestamp(target_date).dayofyear)
-    hist_doy = df_ml["day_of_year"].astype(int).to_numpy()
-    delta = np.abs(hist_doy - doy)
-    delta = np.minimum(delta, 366 - delta)
-    mask = delta <= int(window)
-    vals = df_ml.loc[mask, forecast_target].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
-    if len(vals) < 3:
-        vals = df_ml[forecast_target].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
-    if len(vals) == 0:
-        return None
-    return float(np.median(vals.to_numpy()))
-
-
-def _auto_tune_blir_params(X_scaled, y, holdout_days=28):
-    """Pick ARD hyperparameters by one-step holdout MAE on the most recent days."""
-    defaults = {
-        "alpha_1": 1e-6,
-        "alpha_2": 1e-6,
-        "lambda_1": 1e-6,
-        "lambda_2": 1e-6,
-    }
-    y_arr = np.asarray(y, dtype=float).ravel()
-    holdout = int(max(14, min(holdout_days, len(y_arr) // 4)))
-    if len(y_arr) < holdout + 40:
-        return defaults, None
-
-    X_tr = X_scaled.iloc[:-holdout]
-    y_tr = y_arr[:-holdout]
-    X_ho = X_scaled.iloc[-holdout:]
-    y_ho = y_arr[-holdout:]
-
-    candidates = []
-    for exp in (-8, -6, -4, -3):
-        v = float(10.0 ** exp)
-        candidates.append({"alpha_1": v, "alpha_2": v, "lambda_1": v, "lambda_2": v})
-    candidates.extend([
-        {"alpha_1": 1e-4, "alpha_2": 1e-4, "lambda_1": 1e-6, "lambda_2": 1e-6},
-        {"alpha_1": 1e-6, "alpha_2": 1e-6, "lambda_1": 1e-4, "lambda_2": 1e-4},
-        {"alpha_1": 1e-5, "alpha_2": 1e-5, "lambda_1": 1e-7, "lambda_2": 1e-7},
-    ])
-
-    best_mae = float("inf")
-    best = defaults
-    for cand in candidates:
-        try:
-            model = _build_blir_regressor(cand)
-            model.fit(X_tr, y_tr)
-            pred = np.asarray(model.predict(X_ho), dtype=float).ravel()
-            mae = float(np.mean(np.abs(y_ho - pred)))
-            if np.isfinite(mae) and mae < best_mae:
-                best_mae = mae
-                best = cand
-        except Exception:
-            continue
-
-    note = f"BLiR auto-tuned on last {holdout} days (holdout MAE={best_mae:.4f})."
-    return best, note
-
-
-def _fblir_supports_prescaled(model):
-    try:
-        return "input_prescaled" in inspect.signature(model.fit).parameters
-    except (TypeError, ValueError):
-        return False
-
-
-def _fblir_fit_model(model, X_scaled, y, X_raw):
-    """Fit FBLiR with scaled features when supported; otherwise unscaled once (legacy module)."""
-    if _fblir_supports_prescaled(model):
-        model.fit(X_scaled, y, input_prescaled=True)
-        model._iwfr_uses_prescaled = True
-    else:
-        model.fit(X_raw, y)
-        model._iwfr_uses_prescaled = False
-    return model
-
-
-def _fblir_predict_values(model, X_scaled, X_raw=None, linear_only=False):
-    """Predict with FBLiR; compatible with legacy modules lacking input_prescaled."""
-    use_prescaled = getattr(model, "_iwfr_uses_prescaled", _fblir_supports_prescaled(model))
-    X_in = X_scaled if use_prescaled else (X_raw if X_raw is not None else X_scaled)
-
-    if linear_only:
-        if hasattr(model, "predict_linear_mean"):
-            try:
-                return np.asarray(
-                    model.predict_linear_mean(X_in, input_prescaled=use_prescaled),
-                    dtype=float,
-                ).ravel()
-            except TypeError:
-                return np.asarray(model.predict_linear_mean(X_in), dtype=float).ravel()
-        try:
-            return np.asarray(
-                model.predict(X_in, input_prescaled=use_prescaled, linear_only=True),
-                dtype=float,
-            ).ravel()
-        except TypeError:
-            pass
-
-    if use_prescaled:
-        try:
-            return np.asarray(model.predict(X_in, input_prescaled=True), dtype=float).ravel()
-        except TypeError:
-            return np.asarray(model.predict(X_in), dtype=float).ravel()
-    if X_raw is None:
-        X_raw = X_scaled
-    return np.asarray(model.predict(X_raw), dtype=float).ravel()
-
-
-def _stabilize_fblir_recursive_prediction(
-    pred,
-    seasonal_ref,
-    prev_pred,
-    step_idx,
-    forecast_horizon,
-    linear_z_lo,
-    linear_z_hi,
-):
-    """Tame FBLiR recursive drift: more seasonal anchoring and step-to-step limits later in the horizon."""
-    pred = float(pred)
-    if not np.isfinite(pred):
-        pred = float(prev_pred) if prev_pred is not None and np.isfinite(prev_pred) else pred
-
-    if seasonal_ref is not None and np.isfinite(seasonal_ref):
-        horizon = max(int(forecast_horizon), 1)
-        progress = float(step_idx) / float(max(horizon - 1, 1))
-        w_season = min(0.72, 0.38 + 0.34 * progress)
-        pred = (1.0 - w_season) * pred + w_season * float(seasonal_ref)
-
-    if prev_pred is not None and np.isfinite(prev_pred):
-        span = max(abs(prev_pred), 1.0)
-        max_delta = max(0.35, 0.12 * span)
-        pred = float(np.clip(pred, prev_pred - max_delta, prev_pred + max_delta))
-
-    return float(np.clip(pred, linear_z_lo, linear_z_hi))
-
-
-def _auto_tune_fblir_params(X_scaled, y, X_raw, base_params, holdout_days=21):
-    """Light grid search for FBLiR GFN + ridge settings (one-step holdout)."""
-    params = dict(base_params or {})
-    y_arr = np.asarray(y, dtype=float).ravel()
-    holdout = int(max(14, min(holdout_days, len(y_arr) // 4)))
-    if len(y_arr) < holdout + 40 or not FBLIR_AVAILABLE or FuzzyBayesianRegression is None:
-        return params, None
-
-    X_tr_s, X_ho_s = X_scaled.iloc[:-holdout], X_scaled.iloc[-holdout:]
-    X_tr_r, X_ho_r = X_raw.iloc[:-holdout], X_raw.iloc[-holdout:]
-    y_tr, y_ho = y_arr[:-holdout], y_arr[-holdout:]
-
-    m_vals = [0.05, 0.1, 0.2]
-    fuzz_vals = [0.03, 0.05, 0.08]
-    tau_vals = [0.5, 1.0, 2.0]
-
-    best_mae = float("inf")
-    best = params
-    for m_val in m_vals:
-        for fuzz_val in fuzz_vals:
-            for tau_val in tau_vals:
-                trial = dict(params)
-                trial.update({"m": m_val, "fuzzification_factor": fuzz_val, "tau": tau_val})
-                try:
-                    model = _build_fblir_regressor(trial)
-                    _fblir_fit_model(model, X_tr_s, y_tr, X_tr_r)
-                    pred = _fblir_predict_values(model, X_ho_s, X_ho_r, linear_only=True)
-                    mae = float(np.mean(np.abs(y_ho - pred)))
-                    if np.isfinite(mae) and mae < best_mae:
-                        best_mae = mae
-                        best = trial
-                except Exception:
-                    continue
-
-    note = f"FBLiR auto-tuned on last {holdout} days (holdout MAE={best_mae:.4f})."
-    return best, note
-
-
-def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3, deterministic=False):
+def get_seasonal_feature_value(historical_data, feature_name, target_date, lookback_years=3):
     """
     ✨ NEW FUNCTION: Get feature value for a future date based on historical seasonal patterns
     This ensures features follow their natural seasonality in forecasts
@@ -1430,10 +1127,10 @@ def get_seasonal_feature_value(historical_data, feature_name, target_date, lookb
     ]
     
     if len(matching_rows) > 0 and feature_name in matching_rows.columns:
-        seasonal_value = float(matching_rows[feature_name].mean())
-        if deterministic:
-            return seasonal_value
-        # Small random variation (±5%) for realism in exploratory runs only.
+        # Use the mean of matching historical values
+        seasonal_value = matching_rows[feature_name].mean()
+        
+        # Add small random variation (±5%) for realism
         variation = np.random.normal(0, abs(seasonal_value) * 0.05)
         return seasonal_value + variation
     else:
@@ -1481,34 +1178,6 @@ def train_gradient_boosting(X_train, y_train, X_future, params=None):
     predictions = model.predict(X_future)
     return predictions
 
-def _fblir_n_samples_from_params(params: dict) -> int:
-    adapt = int(params.get("adapt_steps", 200))
-    burnin = int(params.get("burnin_steps", 200))
-    n_chains = max(1, int(params.get("N_chains", 2)))
-    thinning = max(1, int(params.get("thinning_steps", 7)))
-    return min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
-
-
-def _build_fblir_regressor(params: dict | None):
-    """Construct FuzzyBayesianRegression with GFN + prior hyperparameters (tau, sigma_0^2)."""
-    params = params or {}
-    tau, sigma_0_squared = parse_tau_sigma_0_params(params)
-    n_samples = _fblir_n_samples_from_params(params)
-    base_kw = dict(
-        n_samples=n_samples,
-        symmetry_threshold=params.get("symmetry_threshold", 0.5),
-        k=params.get("k", 0.5),
-        m=params.get("m", 0.1),
-        fuzzify_variance=params.get("fuzzification_factor", 0.05),
-        use_quadratic=True,
-        small_delta_threshold=params.get("symmetry_threshold", 0.4),
-    )
-    try:
-        return FuzzyBayesianRegression(tau=tau, sigma_0_squared=sigma_0_squared, **base_kw)
-    except TypeError:
-        return FuzzyBayesianRegression(**base_kw)
-
-
 def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
     """Train Fuzzy Bayesian Linear Regression model"""
     if not FBLIR_AVAILABLE:
@@ -1523,17 +1192,35 @@ def train_fblir(X_train, y_train, X_val, y_val, X_future, params=None):
             'N_chains': 2,
             'adapt_steps': 200,
             'burnin_steps': 200,
-            'thinning_steps': 7,
-            'tau': 1.0,
-            'sigma_0_squared': 1.0,
+            'thinning_steps': 7
         }
     
     try:
         # Check if we have FuzzyBayesianRegression (V2/V3) or only FuzzyBayesianRegressionTuned (original)
         if FuzzyBayesianRegression is not None:
-            model = _build_fblir_regressor(params)
-            _fblir_fit_model(model, X_train, y_train, X_train)
-            predictions = _fblir_predict_values(model, X_future, X_future)
+            # Use V2/V3: Calculate n_samples from Bayesian parameters
+            # Note: n_samples is the number of posterior samples, not total MCMC steps
+            # We use a reasonable calculation: base samples per chain, scaled by chains and thinning
+            adapt = int(params.get("adapt_steps", 200))
+            burnin = int(params.get("burnin_steps", 200))
+            n_chains = max(1, int(params.get("N_chains", 2)))
+            thinning = max(1, int(params.get("thinning_steps", 7)))
+            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
+            
+            # Use FuzzyBayesianRegression directly to pass all parameters
+            # Using Gaussian Fuzzy Numbers (GFN) operations from Abdalla & Buckley 2007
+            model = FuzzyBayesianRegression(
+                n_samples=n_samples,
+                symmetry_threshold=params.get('symmetry_threshold', 0.5),
+                k=params.get('k', 0.5),  # Deprecated but kept for compatibility
+                m=params.get('m', 0.1),  # Defuzzification magnitude (optimal typically 0.1-0.3)
+                fuzzify_variance=params.get('fuzzification_factor', 0.05),
+                use_quadratic=True,
+                small_delta_threshold=params.get('symmetry_threshold', 0.4)  # Delta threshold for defuzzification (from R code)
+            )
+            # Fit the model
+            model.fit(X_train, y_train)
+            predictions = model.predict(X_future)
             return predictions
         else:
             # Fallback to original FuzzyBayesianRegressionTuned (doesn't support all parameters)
@@ -2183,10 +1870,26 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "Bayesian Linear Regression":
+        # BayesianRidge often collapses to ~intercept-only fits when lags + calendar features are
+        # highly correlated. ARD regression keeps a Bayesian linear model but with per-feature scales.
+        # A modest Ridge blend restores seasonal structure in fitted values (matches iterative path).
         mp = model_params.get("Bayesian Linear Regression") or {}
-        m = _build_blir_regressor(mp)
+        m = ARDRegression(
+            alpha_1=float(mp.get("alpha_1", 1e-6)),
+            alpha_2=float(mp.get("alpha_2", 1e-6)),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            max_iter=700,
+            tol=1e-4,
+            threshold_lambda=1e12,
+        )
         m.fit(X_scaled, y_arr)
-        return np.asarray(m.predict(X_scaled), dtype=float)
+        ridge_stab = Ridge(alpha=1.5, random_state=42)
+        ridge_stab.fit(X_scaled, y_arr)
+        blend = 0.26
+        p_ard = np.asarray(m.predict(X_scaled), dtype=float)
+        p_r = np.asarray(ridge_stab.predict(X_scaled), dtype=float)
+        return (1.0 - blend) * p_ard + blend * p_r
     if method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
         m = RandomForestRegressor(
@@ -2222,12 +1925,24 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         m.fit(X_scaled, y_arr)
         return np.asarray(m.predict(X_scaled), dtype=float)
     if method == "FBLiR":
-        params = dict(model_params.get("FBLiR") or {})
-        X_raw = df_ml[list(X_scaled.columns)]
+        params = model_params.get("FBLiR") or {}
         if FuzzyBayesianRegression is not None:
-            m = _build_fblir_regressor(params)
-            _fblir_fit_model(m, X_scaled, y_arr, X_raw)
-            return _fblir_predict_values(m, X_scaled, X_raw)
+            adapt = int(params.get("adapt_steps", 200))
+            burnin = int(params.get("burnin_steps", 200))
+            thinning = max(1, int(params.get("thinning_steps", 7)))
+            n_chains = max(1, int(params.get("N_chains", 2)))
+            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
+            m = FuzzyBayesianRegression(
+                n_samples=n_samples,
+                symmetry_threshold=params.get("symmetry_threshold", 0.5),
+                k=params.get("k", 0.5),
+                m=params.get("m", 0.1),
+                fuzzify_variance=params.get("fuzzification_factor", 0.05),
+                use_quadratic=True,
+                small_delta_threshold=params.get("symmetry_threshold", 0.4),
+            )
+            m.fit(X_scaled, y_arr)
+            return np.asarray(m.predict(X_scaled), dtype=float).ravel()
         split_idx = int(len(X_scaled) * 0.8)
         X_train_f = X_scaled.iloc[:split_idx]
         y_train_f = pd.Series(y_arr).iloc[:split_idx]
@@ -2235,13 +1950,8 @@ def _fit_in_sample_predictions(method, X_scaled, y, df_ml, forecast_target, mode
         y_val_f = pd.Series(y_arr).iloc[split_idx:]
         base_samples = min(max(100, int(params.get("adapt_steps", 200)) + int(params.get("burnin_steps", 200))), 1500)
         m = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
-        try:
-            m.fit(X_train_f, y_train_f, X_val_f, y_val_f, input_prescaled=True)
-            m._iwfr_uses_prescaled = True
-        except TypeError:
-            m.fit(X_raw.iloc[:split_idx], y_train_f, X_raw.iloc[split_idx:], y_val_f)
-            m._iwfr_uses_prescaled = False
-        return _fblir_predict_values(m, X_scaled, X_raw)
+        m.fit(X_train_f, y_train_f, X_val_f, y_val_f)
+        return np.asarray(m.predict(X_scaled), dtype=float).ravel()
     if method == "Prophet":
         df_prophet = df_ml[["date", forecast_target]].copy()
         df_prophet.columns = ["ds", "y"]
@@ -2586,7 +2296,7 @@ def _build_forecast_pdf_report_bytes(payload):
         story.append(img)
         story.append(Spacer(1, 0.22 * cm))
 
-    add_title(f"{IWFR_DISPLAY_NAME} Forecast Report")
+    add_title("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
     if payload.get("plain_summary"):
         add_para(payload["plain_summary"])
     if payload.get("insights_md"):
@@ -2706,7 +2416,7 @@ def _build_forecast_pdf_report_bytes_pillow(payload):
         page.paste(img, (margin, y))
         y += img.height + 18
 
-    write_line(f"{IWFR_DISPLAY_NAME} Forecast Report")
+    write_line("Intelligence Wildfire Forecaster (IWFR) Forecast Report")
     write_line("-" * 40)
     for ln in str(payload.get("plain_summary", "")).split("\n"):
         if ln.strip():
@@ -2786,19 +2496,25 @@ def run_iterative_ml_forecast(
             return float(model.predict(row_scaled_df)[0])
 
     elif method == "Bayesian Linear Regression":
-        mp = dict(model_params.get("Bayesian Linear Regression") or {})
-        if mp.pop("auto_tune", False):
-            tuned, tune_note = _auto_tune_blir_params(
-                X_scaled, y, holdout_days=int(mp.pop("holdout_days", 28))
-            )
-            mp.update(tuned)
-            if tune_note:
-                st.session_state["_iwfr_last_blir_tune"] = tune_note
-        model = _build_blir_regressor(mp)
+        mp = model_params.get("Bayesian Linear Regression") or {}
+        model = ARDRegression(
+            alpha_1=float(mp.get("alpha_1", 1e-6)),
+            alpha_2=float(mp.get("alpha_2", 1e-6)),
+            lambda_1=float(mp.get("lambda_1", 1e-6)),
+            lambda_2=float(mp.get("lambda_2", 1e-6)),
+            max_iter=700,
+            tol=1e-4,
+            threshold_lambda=1e12,
+        )
         model.fit(X_scaled, y)
+        ridge_stab = Ridge(alpha=1.5, random_state=42)
+        ridge_stab.fit(X_scaled, y)
+        _blr_blend = 0.26
 
         def predict_one(row_scaled_df):
-            return float(model.predict(row_scaled_df)[0])
+            pa = float(model.predict(row_scaled_df)[0])
+            pr = float(ridge_stab.predict(row_scaled_df)[0])
+            return float((1.0 - _blr_blend) * pa + _blr_blend * pr)
 
     elif method == "Random Forest":
         mp = model_params.get("Random Forest") or {}
@@ -2846,100 +2562,60 @@ def run_iterative_ml_forecast(
     elif method == "FBLiR":
         if not FBLIR_AVAILABLE:
             raise ImportError("FBLiR is not available.")
-        params = dict(model_params.get("FBLiR") or {})
-        X_raw = df_ml[feature_names]
-        if params.pop("auto_tune", False):
-            tuned, tune_note = _auto_tune_fblir_params(
-                X_scaled,
-                y,
-                X_raw,
-                params,
-                holdout_days=int(params.pop("holdout_days", 21)),
-            )
-            params.update(tuned)
-            if tune_note:
-                st.session_state["_iwfr_last_fblir_tune"] = tune_note
+        params = model_params.get("FBLiR") or {}
         adapt = int(params.get("adapt_steps", 200))
         burnin = int(params.get("burnin_steps", 200))
         if FuzzyBayesianRegression is not None:
-            model = _build_fblir_regressor(params)
-            _fblir_fit_model(model, X_scaled, y, X_raw)
+            thinning = max(1, int(params.get("thinning_steps", 7)))
+            n_chains = max(1, int(params.get("N_chains", 2)))
+            n_samples = min(max(100, ((adapt + burnin) * n_chains) // thinning), 2200)
+            model = FuzzyBayesianRegression(
+                n_samples=n_samples,
+                symmetry_threshold=params.get("symmetry_threshold", 0.5),
+                k=params.get("k", 0.5),
+                m=params.get("m", 0.1),
+                fuzzify_variance=params.get("fuzzification_factor", 0.05),
+                use_quadratic=True,
+                small_delta_threshold=params.get("symmetry_threshold", 0.4),
+            )
+            model.fit(X_scaled, y)
+
+            def predict_one(row_scaled_df):
+                pr = model.predict(row_scaled_df)
+                return float(np.asarray(pr).ravel()[0])
         else:
             split_idx = int(len(X_scaled) * 0.8)
             X_train_f = X_scaled.iloc[:split_idx]
             y_train_f = y.iloc[:split_idx]
             X_val_f = X_scaled.iloc[split_idx:]
             y_val_f = y.iloc[split_idx:]
-            X_train_r = X_raw.iloc[:split_idx]
             base_samples = min(max(100, adapt + burnin), 1500)
             model = FuzzyBayesianRegressionTuned(n_samples=base_samples, use_quadratic=True)
-            try:
-                model.fit(X_train_f, y_train_f, X_val_f, y_val_f, input_prescaled=True)
-                model._iwfr_uses_prescaled = True
-            except TypeError:
-                model.fit(X_train_r, y_train_f, X_raw.iloc[split_idx:], y_val_f)
-                model._iwfr_uses_prescaled = False
+            model.fit(X_train_f, y_train_f, X_val_f, y_val_f)
+
+            def predict_one(row_scaled_df):
+                pr = model.predict(row_scaled_df)
+                return float(np.asarray(pr).ravel()[0])
     else:
         raise ValueError(f"Unknown iterative ML method: {method}")
 
-    is_fblir = method == "FBLiR"
-    fblir_roll_std_caps = {}
-    if is_fblir:
-        for window in [3, 7, 14]:
-            std_col = f"{forecast_target}_rolling_std_{window}"
-            if std_col in feature_names and std_col in df_ml.columns:
-                cap = float(df_ml[std_col].replace([np.inf, -np.inf], np.nan).median())
-                if np.isfinite(cap) and cap > 0:
-                    fblir_roll_std_caps[std_col] = cap * 1.35
-
-    prev_fblir_pred = float(y.iloc[-1]) if is_fblir and len(y) else None
-
-    for step_idx in range(forecast_horizon):
-        next_date = current_data["date"].iloc[-1] + timedelta(days=1)
-        seasonal_ref = _seasonal_target_reference(df_ml, forecast_target, next_date)
-
+    for _step in range(forecast_horizon):
         last_row = current_data.iloc[[-1]][feature_names]
-        last_row = pd.DataFrame(
-            sanitize_float_matrix(last_row.values),
-            columns=feature_names,
-        )
         last_row_scaled = pd.DataFrame(
             scaler.transform(last_row),
             columns=feature_names,
         )
-        if is_fblir:
-            pred = float(
-                _fblir_predict_values(model, last_row_scaled, last_row, linear_only=True)[0]
-            )
-        else:
-            pred = predict_one(last_row_scaled)
-
-        if method == "Linear Regression":
+        pred = predict_one(last_row_scaled)
+        if method in ("Linear Regression", "Bayesian Linear Regression"):
             tail_z = current_data[forecast_target].tail(21)
             anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            pred = 0.86 * pred + 0.14 * anchor
+            # Anchor blend tames recursive drift; Bayesian linear uses a lighter mix (ARD + Ridge blend already stabilizes).
+            mix = 0.14 if method == "Linear Regression" else 0.045
+            pred = (1.0 - mix) * pred + mix * anchor
             pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
-        elif method == "Bayesian Linear Regression":
-            if seasonal_ref is not None:
-                pred = 0.58 * pred + 0.42 * seasonal_ref
-            tail_z = current_data[forecast_target].tail(14)
-            anchor = float(np.nanmean(tail_z)) if len(tail_z) else pred
-            pred = 0.92 * pred + 0.08 * anchor
-            pred = float(np.clip(pred, linear_z_lo, linear_z_hi))
-        elif method == "FBLiR":
-            pred = _stabilize_fblir_recursive_prediction(
-                pred,
-                seasonal_ref,
-                prev_fblir_pred,
-                step_idx,
-                forecast_horizon,
-                linear_z_lo,
-                linear_z_hi,
-            )
-            prev_fblir_pred = pred
         predictions.append(pred)
 
-        new_date = next_date
+        new_date = current_data["date"].iloc[-1] + timedelta(days=1)
         new_row = {
             "date": new_date,
             forecast_target: pred,
@@ -2952,7 +2628,6 @@ def run_iterative_ml_forecast(
                 historical_data=df_ml,
                 feature_name=feat,
                 target_date=new_date,
-                deterministic=True,
             )
         for lag in range(1, 8):
             lag_col = f"{forecast_target}_lag_{lag}"
@@ -2969,10 +2644,7 @@ def run_iterative_ml_forecast(
                 new_row[mean_col] = np.mean(recent_values)
             if std_col in feature_names:
                 recent_values = list(current_data[forecast_target].tail(window - 1)) + [pred]
-                std_val = np.std(recent_values) if len(recent_values) > 1 else 0.0
-                if is_fblir and std_col in fblir_roll_std_caps:
-                    std_val = min(float(std_val), fblir_roll_std_caps[std_col])
-                new_row[std_col] = std_val
+                new_row[std_col] = np.std(recent_values) if len(recent_values) > 1 else 0
         current_data = pd.concat([current_data, pd.DataFrame([new_row])], ignore_index=True)
 
     return np.array(predictions, dtype=float)
@@ -3167,55 +2839,15 @@ if data_source == "Forecasting":
 
         if "Bayesian Linear Regression" in forecast_methods:
             st.markdown("**Bayesian Linear Regression**")
-            st.markdown("**ARD prior hyperparameters (sklearn):**")
-            blr_alpha1 = st.number_input(
-                "alpha_1",
-                min_value=1e-10,
-                max_value=1.0,
-                value=1e-6,
-                format="%.2e",
-                key="blr_alpha1",
-                help="Shape parameter for the Gamma prior on inverse noise precision.",
-            )
-            blr_alpha2 = st.number_input(
-                "alpha_2",
-                min_value=1e-10,
-                max_value=1.0,
-                value=1e-6,
-                format="%.2e",
-                key="blr_alpha2",
-                help="Rate parameter for the Gamma prior on inverse noise precision.",
-            )
-            blr_lambda1 = st.number_input(
-                "lambda_1",
-                min_value=1e-10,
-                max_value=1.0,
-                value=1e-6,
-                format="%.2e",
-                key="blr_lambda1",
-                help="Shape parameter for the Gamma prior on weight precisions.",
-            )
-            blr_lambda2 = st.number_input(
-                "lambda_2",
-                min_value=1e-10,
-                max_value=1.0,
-                value=1e-6,
-                format="%.2e",
-                key="blr_lambda2",
-                help="Rate parameter for the Gamma prior on weight precisions.",
-            )
+            blr_alpha_1 = st.number_input("alpha_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_1")
+            blr_alpha_2 = st.number_input("alpha_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_alpha_2")
+            blr_lambda_1 = st.number_input("lambda_1", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_1")
+            blr_lambda_2 = st.number_input("lambda_2", min_value=1e-8, max_value=1.0, value=1e-6, format="%.8f", key="blr_lambda_2")
             model_params["Bayesian Linear Regression"] = {
-                "alpha_1": float(blr_alpha1),
-                "alpha_2": float(blr_alpha2),
-                "lambda_1": float(blr_lambda1),
-                "lambda_2": float(blr_lambda2),
-                "auto_tune": st.checkbox(
-                    "Auto-tune on recent holdout (28 days)",
-                    value=True,
-                    key="blr_auto_tune",
-                    help="Search ARD priors on the last ~28 days before forecasting.",
-                ),
-                "holdout_days": 28,
+                "alpha_1": float(blr_alpha_1),
+                "alpha_2": float(blr_alpha_2),
+                "lambda_1": float(blr_lambda_1),
+                "lambda_2": float(blr_lambda_2),
             }
         
         if 'Gradient Boosting' in forecast_methods:
@@ -3255,28 +2887,6 @@ if data_source == "Forecasting":
         
         if 'FBLiR' in forecast_methods and FBLIR_AVAILABLE:
             st.markdown("**FBLiR (Fuzzy Bayesian Linear Regression)**")
-
-            st.markdown("**Bayesian prior hyperparameters:**")
-            fblir_tau = st.number_input(
-                "tau (prior std for slopes β_j)",
-                min_value=1e-4,
-                max_value=100.0,
-                value=1.0,
-                step=0.1,
-                format="%.4f",
-                key="fblir_tau",
-                help="Prior: β_j ~ N(0, τ²) for j = 1, …, p* (model-fit layer, before GFN fuzzification).",
-            )
-            fblir_sigma0 = st.number_input(
-                "sigma_0_squared (prior variance for intercept β_0)",
-                min_value=1e-6,
-                max_value=100.0,
-                value=1.0,
-                step=0.1,
-                format="%.4f",
-                key="fblir_sigma0",
-                help="Prior: β_0 ~ N(0, σ₀²).",
-            )
             
             # GFN Operation Parameters
             st.markdown("**GFN Operation Parameters:**")
@@ -3301,8 +2911,6 @@ if data_source == "Forecasting":
                                                    help="Thinning interval for MCMC samples")
             
             model_params['FBLiR'] = {
-                'tau': float(fblir_tau),
-                'sigma_0_squared': float(fblir_sigma0),
                 'm': fblir_m,
                 'k': fblir_k,
                 'fuzzification_factor': fblir_fuzz,
@@ -3310,14 +2918,7 @@ if data_source == "Forecasting":
                 'N_chains': fblir_n_chains,
                 'adapt_steps': fblir_adapt_steps,
                 'burnin_steps': fblir_burnin_steps,
-                'thinning_steps': fblir_thinning_steps,
-                'auto_tune': st.checkbox(
-                    "Auto-tune on recent holdout (21 days)",
-                    value=True,
-                    key="fblir_auto_tune",
-                    help="Grid-search m, fuzzification factor, and tau on the last ~21 days.",
-                ),
-                'holdout_days': 21,
+                'thinning_steps': fblir_thinning_steps
             }
         
         if "LLM Forecaster" in forecast_methods:
@@ -3646,7 +3247,7 @@ if hasattr(st, "dialog"):
 
     @st.dialog("🤖 IWFR Assistant", width="large")
     def faim_assistant_dialog():
-        st.caption(f"Tips and how-to for {IWFR_DISPLAY_NAME}. Close with the dialog X when you are done.")
+        st.caption("Tips and how-to for Intelligence Wildfire Forecaster (IWFR). Close with the dialog X when you are done.")
         chat_messages_container = st.container(height=420)
         with chat_messages_container:
             for message in st.session_state.chat_history:
@@ -4190,11 +3791,6 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 X = df_ml[feature_names]
                                 y = df_ml[forecast_target]
 
-                                X_values = sanitize_float_matrix(X.values)
-                                X = pd.DataFrame(X_values, columns=feature_names, index=X.index)
-                                y_values = sanitize_float_vector(y.values)
-                                y = pd.Series(y_values, index=y.index, name=forecast_target)
-
                                 scaler = StandardScaler()
                                 X_scaled = pd.DataFrame(
                                     scaler.fit_transform(X),
@@ -4274,14 +3870,6 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 }
 
                                 if forecast_results:
-                                    tune_notes = []
-                                    if st.session_state.get("_iwfr_last_blir_tune"):
-                                        tune_notes.append(st.session_state.pop("_iwfr_last_blir_tune"))
-                                    if st.session_state.get("_iwfr_last_fblir_tune"):
-                                        tune_notes.append(st.session_state.pop("_iwfr_last_fblir_tune"))
-                                    for note in tune_notes:
-                                        st.caption(note)
-
                                     st.session_state.forecast_insights_md = generate_forecast_insights_markdown(
                                         forecast_results_display,
                                         daily_avg,
@@ -4985,9 +4573,9 @@ with c2:
 
 # Footer
 st.markdown("---")
-st.markdown(f"""
+st.markdown("""
 <div style='text-align: center; color: gray;'>
-🎯 {IWFR_DISPLAY_NAME} v1.5.3 | Built with Streamlit<br>
+🎯 Intelligence Wildfire Forecaster (IWFR) v1.5.3 | Built with Streamlit<br>
 Powered by NASA POWER data from Goddard Earth Sciences Data and Information Services Center (GES DISC)
 </div>
 """, unsafe_allow_html=True)
