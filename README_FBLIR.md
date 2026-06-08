@@ -7,7 +7,7 @@ This package provides **two solutions** for integrating Fuzzy Bayesian Linear Re
 1. **Pure Python Implementation** (Recommended) - Fast, easy to integrate
 2. **R Bridge with JAGS** (Advanced) - Full Bayesian model selection
 
-## 📦 Files Included
+## Files Included
 
 ```
 fuzzy_bayesian_regression.py  - Pure Python FBLiR implementation
@@ -18,16 +18,16 @@ README_FBLIR.md                - This file
 
 ---
 
-## Solution 1: Pure Python Implementation ⭐ RECOMMENDED
+## Solution 1: Pure Python Implementation 
 
-### ✅ Advantages
+### Advantages
 - No R installation required
 - Fast execution (2-10 seconds per forecast)
 - Easy integration with existing code
 - All dependencies already in your app
 - Automatic hyperparameter tuning
 
-### 📥 Installation
+### Installation
 
 **Step 1: Add FBLiR module to your app directory**
 ```bash
@@ -65,7 +65,7 @@ Test Complete!
 ============================================================
 ```
 
-### 🔧 Integration with FAIM
+### Integration with FAIM
 
 **Step 1: Add import to your app**
 ```python
@@ -163,7 +163,7 @@ if 'FBLiR' in results:
         st.metric("Uncertainty", uncertainty)
 ```
 
-### 📊 Performance Characteristics
+### Performance Characteristics
 
 | Metric | Value |
 |--------|-------|
@@ -173,7 +173,7 @@ if 'FBLiR' in results:
 | Accuracy | Comparable to Gradient Boosting |
 | Best For | Uncertainty quantification, noisy data |
 
-### ⚙️ Hyperparameters Explained
+### Hyperparameters Explained
 
 ```python
 FuzzyBayesianRegressionTuned(
@@ -194,12 +194,12 @@ The model automatically tunes:
 
 ## Solution 2: R Bridge with JAGS (Advanced)
 
-### ⚠️ Use This If:
+### Use This If:
 - You need the full Bayesian model selection from your R script
 - You want automatic model comparison (linear vs. quadratic terms per feature)
 - You're comfortable managing R dependencies
 
-### 📥 Installation
+### Installation
 
 **Step 1: Install R** (if not already installed)
 ```bash
@@ -239,7 +239,7 @@ pip install rpy2
 python fblir_r_bridge.py
 ```
 
-### 🔧 Integration
+### Integration
 
 ```python
 from fblir_r_bridge import FBLiRJAGS
@@ -257,7 +257,7 @@ if RPY2_AVAILABLE:
     predictions, metrics = fblir_jags.fit_predict(X_train, y_train, X_test)
 ```
 
-### 📊 Performance Characteristics
+### Performance Characteristics
 
 | Metric | Value |
 |--------|-------|
@@ -269,7 +269,7 @@ if RPY2_AVAILABLE:
 
 ---
 
-## 🔬 What is FBLiR?
+## What is FBLiR?
 
 **Fuzzy Bayesian Linear Regression** combines three powerful concepts:
 
@@ -288,16 +288,16 @@ if RPY2_AVAILABLE:
 - Can capture non-linear patterns with squared terms
 - Automatic relevance determination (like regularization)
 
-### 🎯 When to Use FBLiR
+### When to Use FBLiR
 
-✅ **Use FBLiR when:**
+**Use FBLiR when:**
 - You need uncertainty quantification (risk assessment)
 - Data has measurement noise or imprecision
 - You want confidence intervals on predictions
 - Data size is moderate (50-1000 samples)
 - You're forecasting continuous variables (temperature, FWI, etc.)
 
-❌ **Don't use FBLiR when:**
+**Don't use FBLiR when:**
 - You need fastest possible predictions (use Random Forest)
 - Data is very large (>10,000 samples) (use XGBoost instead)
 - You're doing classification, not regression
@@ -305,22 +305,7 @@ if RPY2_AVAILABLE:
 
 ---
 
-## 📈 Comparison with Other Methods
-
-| Method | Speed | Accuracy | Uncertainty | Interpretability |
-|--------|-------|----------|-------------|------------------|
-| Linear Regression | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | ❌ | ⭐⭐⭐⭐⭐ |
-| Random Forest | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐ (via trees) | ⭐⭐ |
-| Gradient Boosting | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ❌ | ⭐⭐ |
-| XGBoost | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ❌ | ⭐⭐ |
-| Prophet | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ |
-| SARIMA | ⭐⭐ | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐ |
-| **FBLiR (Python)** | ⭐⭐⭐ | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-| **FBLiR (R/JAGS)** | ⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
-
----
-
-## 🧪 Testing & Validation
+## Testing & Validation
 
 ### Test 1: Synthetic Data
 ```python
@@ -380,7 +365,7 @@ for name, model in results.items():
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Issue: "FBLiR not available"
 **Solution**: 
@@ -482,30 +467,6 @@ Where:
 
 ---
 
-## 🚀 Next Steps
-
-### For Quick Start:
-1. Copy `fuzzy_bayesian_regression.py` to your app directory
-2. Add import: `from fuzzy_bayesian_regression import FuzzyBayesianRegressionTuned`
-3. Add to your models dictionary
-4. Add to UI selection
-5. Test with your data!
-
-### For Production:
-1. Run hyperparameter tuning on a validation set
-2. Save best parameters
-3. Use fixed parameters in production for speed
-4. Monitor prediction intervals for uncertainty
-5. Compare with ensemble of other methods
-
-### For Research:
-1. Use R bridge with JAGS for full Bayesian inference
-2. Compare model selection (linear vs. quadratic per feature)
-3. Analyze posterior distributions
-4. Publish uncertainty quantification results
-
----
-
 ## 💬 Support
 
 **Questions?** Common issues:
@@ -523,7 +484,7 @@ The integration code in `fblir_integration.py` has complete examples for:
 
 ---
 
-## 📄 License
+## License
 
 This FBLiR implementation is provided as-is for integration with your FAIM application.
 Uses standard scientific computing libraries (numpy, pandas, scipy, sklearn).
