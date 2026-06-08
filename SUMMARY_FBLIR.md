@@ -1,4 +1,4 @@
-# FBLiR for FAIM: Conversion Complete! 🎉
+# FBLiR for FAIM: Conversion Complete! 
 
 ## What You Asked For
 
@@ -10,7 +10,7 @@ You wanted to convert your R-based Fuzzy Bayesian Linear Regression (FBLiR) **im
 
 I've provided **TWO complete solutions**:
 
-### ✅ Solution 1: Pure Python FBLiR (RECOMMENDED)
+### Solution 1: Pure Python FBLiR (RECOMMENDED)
 **Best for:** Easy integration, fast, no R needed
 
 **Files:**
@@ -23,7 +23,7 @@ I've provided **TWO complete solutions**:
 python fuzzy_bayesian_regression.py
 ```
 
-### ✅ Solution 2: R Bridge (Advanced)
+### Solution 2: R Bridge (Advanced)
 **Best for:** Full Bayesian model selection, research use
 
 **Files:**
@@ -34,7 +34,7 @@ python fuzzy_bayesian_regression.py
 
 ---
 
-## 📦 All Files Delivered
+## All Files Delivered
 
 1. **fuzzy_bayesian_regression.py** ⭐ - Main Python FBLiR module
 2. **QUICKSTART_FBLIR.py** ⭐ - Quick integration example (START HERE!)
@@ -45,7 +45,7 @@ python fuzzy_bayesian_regression.py
 
 ---
 
-## 🚀 Quick Start (5 Minutes)
+## Quick Start (5 Minutes)
 
 ### Step 1: Test FBLiR
 ```bash
@@ -128,7 +128,7 @@ That's it! FBLiR is now integrated.
 
 ---
 
-## ✨ Key Differences from Your R Script
+## Key Differences from Your R Script
 
 ### What's the Same:
 ✓ Generalized Fuzzy Numbers (GFN) operations  
@@ -147,17 +147,6 @@ That's it! FBLiR is now integrated.
 
 ### If You Need Full JAGS:
 Use `fblir_r_bridge.py` - it calls your R script from Python!
-
----
-
-## 📊 Performance Comparison
-
-| Method | Speed | Accuracy | Uncertainty | Setup |
-|--------|-------|----------|-------------|-------|
-| **Python FBLiR** | Fast (5-30 sec) | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Easy |
-| **R Bridge JAGS** | Slow (30-120 sec) | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Complex |
-| Random Forest | Very Fast | ⭐⭐⭐⭐ | ⭐ | Easy |
-| Gradient Boosting | Fast | ⭐⭐⭐⭐⭐ | ⭐ | Easy |
 
 ---
 
