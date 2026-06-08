@@ -36,7 +36,7 @@
 
 ## Features of Your Web App
 
-### ✅ Current Features
+### Current Features
 - **Interactive Map**: Folium-based map with drawing tools
 - **Data Visualization**: Heatmaps, time series, and animations
 - **Export Functionality**: CSV download of filtered data
@@ -44,7 +44,7 @@
 - **Date Range Filtering**: Flexible date selection
 - **Sample Data**: Demo mode with realistic synthetic data
 
-### 🚧 Features to Implement
+### Features to Implement
 - **NASA POWER API Integration**: Live data fetching
 - **Authentication**: User accounts (if needed)
 - **Advanced Analytics**: Statistical analysis tools
