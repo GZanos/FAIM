@@ -3889,7 +3889,7 @@ with main_viz:
     if st.session_state.show_selection_map:
         # Select appropriate tile layer
         if map_type == "Street":
-            tiles = "CartoDB positron"
+            tiles = "OpenStreetMap"
         elif map_type == "Terrain":
             tiles = "OpenStreetMap"
         else:  # Detailed
@@ -4645,7 +4645,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                         m_forecast_spatial = folium.Map(
                                                             location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
                                                             zoom_start=map_zoom_level,
-                                                            tiles="CartoDB positron"
+                                                            tiles="OpenStreetMap"
                                                         )
                                                     popup_txt = (
                                                         f"Forecast: {chosen_ts.strftime('%Y-%m-%d')} · {best_spatial_method}"
@@ -4904,7 +4904,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     m_timeseries = folium.Map(
                                         location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
                                         zoom_start=map_zoom_level,
-                                        tiles="CartoDB positron"
+                                        tiles="OpenStreetMap"
                                     )
                                 folium.Rectangle(
                                     bounds=[[bounds[1], bounds[0]], [bounds[3], bounds[2]]],
