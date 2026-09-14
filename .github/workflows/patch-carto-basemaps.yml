@@ -1,0 +1,173 @@
+name: Patch CARTO basemaps
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-carto-basemaps.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch CARTO basemap integration
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('wildfire_forecast_app_V1_5_5.py')
+          text = path.read_text(encoding='utf-8')
+
+          old_url = '"https://{s}.basemaps.cartocdn.com/light_all/"'
+          new_url = '"https://{s}.basemaps.cartocdn.com/rastertiles/light_all/"'
+          if old_url not in text:
+              raise SystemExit('Expected CARTO base URL not found')
+          text = text.replace(old_url, new_url, 1)
+
+          old_selection = '''        # Select appropriate tile layer
+        if map_type == "Street":
+            tiles = "CartoDB positron"
+        elif map_type == "Terrain":
+            tiles = "OpenStreetMap"
+        else:  # Detailed
+            tiles = None
+            
+        # Create base map
+        if map_type == "Detailed":
+            m = folium.Map(
+                location=[41.25, -77.5],
+                zoom_start=map_zoom_level
+            )'''
+
+          new_selection = '''        # Select appropriate tile layer
+        if map_type == "Street":
+            tiles = None
+        elif map_type == "Terrain":
+            tiles = "OpenStreetMap"
+        else:  # Detailed
+            tiles = None
+            
+        # Create base map
+        if map_type == "Detailed":
+            m = folium.Map(
+                location=[41.25, -77.5],
+                zoom_start=map_zoom_level
+            )'''
+
+          if old_selection not in text:
+              raise SystemExit('Expected selection-map tile block not found')
+          text = text.replace(old_selection, new_selection, 1)
+
+          old_selection_else = '''        else:
+            m = folium.Map(
+                location=[41.25, -77.5],
+                zoom_start=map_zoom_level,
+                tiles=tiles
+            )'''
+
+          new_selection_else = '''        elif map_type == "Street":
+            m = folium.Map(
+                location=[41.25, -77.5],
+                zoom_start=map_zoom_level,
+                tiles=None
+            )
+            folium.TileLayer(
+                tiles=CARTO_POSITRON,
+                attr='© OpenStreetMap contributors © CARTO',
+                name='Street',
+                overlay=False,
+                control=True,
+                subdomains='abcd',
+                max_zoom=20
+            ).add_to(m)
+        else:  # Terrain
+            m = folium.Map(
+                location=[41.25, -77.5],
+                zoom_start=map_zoom_level,
+                tiles="OpenStreetMap"
+            )'''
+
+          if old_selection_else not in text:
+              raise SystemExit('Expected selection-map constructor block not found')
+          text = text.replace(old_selection_else, new_selection_else, 1)
+
+          old_forecast = '''                                                    else:
+                                                        m_forecast_spatial = folium.Map(
+                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                            zoom_start=map_zoom_level,
+                                                            tiles="CartoDB positron"
+                                                        )'''
+
+          new_forecast = '''                                                    else:
+                                                        m_forecast_spatial = folium.Map(
+                                                            location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                                            zoom_start=map_zoom_level,
+                                                            tiles=None
+                                                        )
+                                                        folium.TileLayer(
+                                                            tiles=CARTO_POSITRON,
+                                                            attr='© OpenStreetMap contributors © CARTO',
+                                                            name='Street',
+                                                            overlay=False,
+                                                            control=True,
+                                                            subdomains='abcd',
+                                                            max_zoom=20
+                                                        ).add_to(m_forecast_spatial)'''
+
+          if old_forecast not in text:
+              raise SystemExit('Expected forecast-spatial CARTO block not found')
+          text = text.replace(old_forecast, new_forecast, 1)
+
+          old_timeseries = '''                                else:
+                                    m_timeseries = folium.Map(
+                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                        zoom_start=map_zoom_level,
+                                        tiles="CartoDB positron"
+                                    )'''
+
+          new_timeseries = '''                                else:
+                                    m_timeseries = folium.Map(
+                                        location=[(bounds[1] + bounds[3])/2, (bounds[0] + bounds[2])/2],
+                                        zoom_start=map_zoom_level,
+                                        tiles=None
+                                    )
+                                    folium.TileLayer(
+                                        tiles=CARTO_POSITRON,
+                                        attr='© OpenStreetMap contributors © CARTO',
+                                        name='Street',
+                                        overlay=False,
+                                        control=True,
+                                        subdomains='abcd',
+                                        max_zoom=20
+                                    ).add_to(m_timeseries)'''
+
+          if old_timeseries not in text:
+              raise SystemExit('Expected time-series CARTO block not found')
+          text = text.replace(old_timeseries, new_timeseries, 1)
+
+          if 'CartoDB positron' in text:
+              raise SystemExit('An unkeyed CartoDB positron reference remains')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit patched app
+        shell: bash
+        run: |
+          if git diff --quiet -- wildfire_forecast_app_V1_5_5.py; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add wildfire_forecast_app_V1_5_5.py
+          git commit -m "Fix CARTO basemap API key integration"
+          git push
