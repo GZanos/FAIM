@@ -29,6 +29,15 @@ import warnings
 import inspect
 warnings.filterwarnings('ignore')
 
+# MAP key API
+CARTO_API_KEY = st.secrets["CARTO_API_KEY"]
+
+CARTO_POSITRON = (
+    "https://{s}.basemaps.cartocdn.com/light_all/"
+    "{z}/{x}/{y}.png"
+    f"?key={CARTO_API_KEY}"
+)
+
 # Try to import FBLiR (Fuzzy Bayesian Linear Regression)
 FBLIR_AVAILABLE = False
 FuzzyBayesianRegression = None
