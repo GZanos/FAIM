@@ -521,6 +521,34 @@ AVAILABLE_PARAMETERS = {
     "TS": "Earth Skin Temperature (°C)"
 }
 
+# Application-native fire-weather screening metrics.
+# Keep the legacy keys (FWI/AFDR) internally for backwards compatibility, but never
+# present them to users as operational Canadian FWI or Australian AFDRS products.
+DERIVED_METRIC_LABELS = {
+    "FWI": "IWFR Fire-Weather Composite (IWFR-FWC)",
+    "AFDR": "IWFR Fire-Danger Score (IWFR-FDS)",
+}
+
+DERIVED_METRIC_SHORT_LABELS = {
+    "FWI": "IWFR-FWC",
+    "AFDR": "IWFR-FDS",
+}
+
+
+def metric_label(name):
+    """User-facing metric label; preserves NASA parameter descriptions."""
+    return DERIVED_METRIC_LABELS.get(name, AVAILABLE_PARAMETERS.get(name, name))
+
+
+def metric_short_label(name):
+    """Compact user-facing label for plot titles and summaries."""
+    return DERIVED_METRIC_SHORT_LABELS.get(name, AVAILABLE_PARAMETERS.get(name, name))
+
+
+def metric_export_name(name):
+    """Filename-safe display name for exported targets."""
+    return DERIVED_METRIC_SHORT_LABELS.get(name, str(name)).replace(" ", "_")
+
 DATA_SOURCE_QUICK_HISTORICAL = "Quick Historical Data"
 
 @st.cache_data(ttl=3600)
@@ -570,7 +598,7 @@ def fetch_nasa_power_data(lat, lon, start_date, end_date, parameters):
         return pd.DataFrame()
 
 def calculate_robust_fwi(temp, humidity, wind, precip):
-    """Calculate Fire Weather Index with robust handling of missing values"""
+    """Calculate IWFR Fire-Weather Composite (IWFR-FWC) with robust handling of missing values."""
     def safe_float(val):
         if pd.isna(val) or val == -999.0 or val == -999:
             return np.nan
@@ -613,7 +641,7 @@ def calculate_robust_fwi(temp, humidity, wind, precip):
         return np.nan
 
 def calculate_afdr(temp, humidity, wind, precip, drought_factor=1.0):
-    """Calculate Australian Fire Danger Rating (AFDR)"""
+    """Calculate IWFR Fire-Danger Score (IWFR-FDS)."""
     def safe_float(val):
         if pd.isna(val) or val == -999.0 or val == -999:
             return np.nan
@@ -656,7 +684,7 @@ def calculate_afdr(temp, humidity, wind, precip, drought_factor=1.0):
         return np.nan
 
 def get_afdr_category(afdr_value):
-    """Get AFDR category and emoji"""
+    """Get the IWFR-FDS screening band and emoji."""
     if afdr_value < 12:
         return "Low-Moderate", "🟢"
     elif afdr_value < 24:
@@ -1994,10 +2022,7 @@ def train_llm_horizon_forecast(
     if seasonal is None:
         seasonal = np.full(forecast_horizon, float(hist_all[forecast_target].mean()))
 
-    tdesc = AVAILABLE_PARAMETERS.get(
-        forecast_target,
-        "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
-    )
+    tdesc = metric_label(forecast_target)
     start_str = future_dates[0].strftime("%Y-%m-%d") if len(future_dates) else ""
 
     n = len(hist_all)
@@ -2040,7 +2065,7 @@ def train_llm_horizon_forecast(
     model = params.get("model", "gpt-4o-mini")
     temperature = min(float(params.get("temperature", 0.15)), 0.35)
     client = OpenAI(api_key=api_key)
-    prompt = f"""You are a scientific forecaster for "{forecast_target}" ({tdesc}).
+    prompt = f"""You are a scientific forecaster for "{metric_short_label(forecast_target)}" ({tdesc}).
 
 {prompt_extra}
 
@@ -2090,13 +2115,14 @@ Respond with ONLY valid JSON: {{"forecast":[ ... {forecast_horizon} numbers ... 
 def _enhanced_heuristic_insights_text(forecast_results, daily_avg, forecast_target, future_dates):
     """Deterministic bullets: trend, seasonality, peaks/troughs, forecasts — always returned."""
     lines = []
+    target_label = metric_short_label(forecast_target)
     ctx = _series_insight_context(daily_avg, forecast_target)
     hist = daily_avg[forecast_target].astype(float)
     last_h = float(hist.iloc[-1])
     hmin, hmax = float(hist.min()), float(hist.max())
 
     lines.append(
-        f"- **Historical level:** last **{forecast_target}** = **{last_h:.2f}**; full-sample range **{hmin:.2f}–{hmax:.2f}**."
+        f"- **Historical level:** last **{target_label}** = **{last_h:.2f}**; full-sample range **{hmin:.2f}–{hmax:.2f}**."
     )
 
     if not ctx.get("error"):
@@ -2180,14 +2206,11 @@ def generate_forecast_insights_markdown(
         }
         for m, v in forecast_results.items()
     }
-    tdesc = AVAILABLE_PARAMETERS.get(
-        forecast_target,
-        "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
-    )
+    tdesc = metric_label(forecast_target)
     client = OpenAI(api_key=api_key)
     prompt = f"""You are an analyst summarizing a wildfire / weather forecast for decision makers.
 
-Target: {forecast_target} ({tdesc}).
+Target: {metric_short_label(forecast_target)} ({tdesc}).
 
 Historical analytics (JSON): {ctx}
 
@@ -2225,6 +2248,7 @@ def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target,
     """2-3 plain-language sentences for non-technical readers."""
     if not forecast_results:
         return ""
+    target_label = metric_short_label(forecast_target)
     hist_mean = float(np.mean(y_hist)) if len(y_hist) else None
     method_means = {m: float(np.mean(np.asarray(v, dtype=float))) for m, v in forecast_results.items()}
     sorted_methods = sorted(method_means.items(), key=lambda kv: kv[1])
@@ -2235,7 +2259,7 @@ def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target,
         closest_m = min(method_means, key=lambda m: abs(method_means[m] - hist_mean))
         dir_word = "above" if method_means[closest_m] >= hist_mean else "below"
         s1 = (
-            f"Across models, expected {forecast_target} stays in a similar overall band, "
+            f"Across models, expected {target_label} stays in a similar overall band, "
             f"with {low_m} lowest and {high_m} highest on average."
         )
         s2 = (
@@ -2244,7 +2268,7 @@ def _simple_forecast_findings_summary(forecast_results, y_hist, forecast_target,
         )
     else:
         s1 = (
-            f"Across models, expected {forecast_target} remains in a consistent range, "
+            f"Across models, expected {target_label} remains in a consistent range, "
             f"from {low_m} (lower) to {high_m} (higher)."
         )
         s2 = f"Model-to-model spread is about {span:.2f} units, indicating moderate uncertainty."
@@ -3149,7 +3173,7 @@ if data_source == "Forecasting":
         "Target Metric to Forecast",
         options=list(AVAILABLE_PARAMETERS.keys()) + ["FWI", "AFDR"],
         index=0,
-        format_func=lambda x: AVAILABLE_PARAMETERS.get(x, "Fire Weather Index" if x == "FWI" else "Australian Fire Danger Rating")
+        format_func=metric_label
     )
     
     # NEW: Feature selection for forecasting with Select All option
@@ -3166,6 +3190,7 @@ if data_source == "Forecasting":
             "Features for Target Metric Forecast",
             options=available_features,
             default=available_features[:3] if len(available_features) >= 3 else available_features,
+            format_func=metric_label,
             help="Select which metrics to use as features for training the forecast model"
         )
     
@@ -3466,7 +3491,7 @@ else:
         "Select Parameter",
         options=list(AVAILABLE_PARAMETERS.keys()) + ["FWI", "AFDR"],
         index=0,
-        format_func=lambda x: AVAILABLE_PARAMETERS.get(x, "Fire Weather Index" if x == "FWI" else "Australian Fire Danger Rating")
+        format_func=metric_label
     )
     forecast_mode = False
     model_params = {}
@@ -3524,7 +3549,7 @@ Ask me anything about the app!"""
 
 **To create forecasts:**
 1. Select "Forecasting" as your data source
-2. Choose a target metric (FWI, AFDR, or any parameter)
+2. Choose a target metric (IWFR-FWC, IWFR-FDS, or any meteorological parameter)
 3. Select features to use for training
 4. Choose forecast methods (Random Forest, XGBoost, FBLiR, etc.)
 5. Set forecast horizon (7-730 days)
@@ -3647,8 +3672,9 @@ FBLiR combines Gaussian Fuzzy Numbers (GFN) and Bayesian inference for uncertain
 - Earth Skin Temperature (TS)
 
 **Calculated Metrics:**
-- **FWI:** Fire Weather Index (0-100)
-- **AFDR:** Australian Fire Danger Rating (0-100)
+- **IWFR-FWC:** IWFR Fire-Weather Composite (0-100 application-native screening score)
+- **IWFR-FDS:** IWFR Fire-Danger Score (0-100 application-native screening score)
+- These are IWFR-specific composite screening metrics and are **not** operational Canadian FWI or Australian AFDRS products.
 
 **Note:** Data is cached for 1 hour to improve performance."""
         },
@@ -4124,7 +4150,7 @@ if not st.session_state.show_selection_map and processed_bounds:
 
                         valid_data_count = gdf_filtered[selected_metric].notna().sum()
                         st.info(
-                            f"📊 Data quality: {valid_data_count}/{len(gdf_filtered)} records have valid {selected_metric} data"
+                            f"📊 Data quality: {valid_data_count}/{len(gdf_filtered)} records have valid {metric_short_label(selected_metric)} data"
                         )
                     else:
                         st.error("❌ Failed to fetch NASA POWER data. Please try again.")
@@ -4446,15 +4472,12 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 if len(y_hist) > 14:
                                     acf_fig_fc = _acf_plotly(
                                         y_hist.values,
-                                        title=f"ACF — {forecast_target} (historical AOI daily mean)",
+                                        title=f"ACF — {metric_short_label(forecast_target)} (historical AOI daily mean)",
                                         max_lag=min(40, max(5, len(y_hist) // 3)),
                                         height=PAIR_DIAG_PLOT_HEIGHT,
                                         margin=PAIR_DIAG_PLOT_MARGIN,
                                     )
-                                metric_description_hist = AVAILABLE_PARAMETERS.get(
-                                    forecast_target,
-                                    "Fire Weather Index" if forecast_target == "FWI" else "Australian Fire Danger Rating" if forecast_target == "AFDR" else forecast_target,
-                                )
+                                metric_description_hist = metric_label(forecast_target)
 
                                 y_true_diag = np.asarray(y, dtype=float)
                                 residual_diagnostics = {}
@@ -4527,9 +4550,9 @@ if not st.session_state.show_selection_map and processed_bounds:
                                             line=dict(color=colors[idx % len(colors)], width=2, dash='dash'),
                                         ))
                                     fig.update_layout(
-                                        title=f"{forecast_target} — historical + forecasts",
+                                        title=f"{metric_short_label(forecast_target)} — historical + forecasts",
                                         xaxis_title="Date",
-                                        yaxis_title=AVAILABLE_PARAMETERS.get(forecast_target, forecast_target),
+                                        yaxis_title=metric_label(forecast_target),
                                         height=480,
                                         margin=dict(t=50, b=40),
                                         hovermode='x unified',
@@ -4713,7 +4736,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                                 else:
                                                     st.info("Insufficient spatial points for this date.")
                                         else:
-                                            st.info(f"No valid {forecast_target} in AOI for mapping.")
+                                            st.info(f"No valid {metric_short_label(forecast_target)} values in the AOI for mapping.")
                                     else:
                                         st.info("No spatial data in AOI.")
 
@@ -4727,11 +4750,11 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 with row2c2:
                                     st.subheader("Historical distribution")
                                     dist_fig_fc = create_distribution_plot(
-                                        y_hist.tolist(), forecast_target, metric_description_hist
+                                        y_hist.tolist(), metric_short_label(forecast_target), metric_description_hist
                                     )
                                     if dist_fig_fc:
                                         dist_fig_fc.update_layout(
-                                            title=f"{forecast_target} — AOI daily mean",
+                                            title=f"{metric_short_label(forecast_target)} — AOI daily mean",
                                             height=PAIR_DIAG_PLOT_HEIGHT,
                                             margin=PAIR_DIAG_PLOT_MARGIN,
                                             autosize=True,
@@ -4870,8 +4893,8 @@ if not st.session_state.show_selection_map and processed_bounds:
                                 daily_avg,
                                 x='date',
                                 y=selected_metric,
-                                title=f"{selected_metric} — AOI daily mean",
-                                labels={'date': 'Date', selected_metric: AVAILABLE_PARAMETERS.get(selected_metric, selected_metric)}
+                                title=f"{metric_short_label(selected_metric)} — AOI daily mean",
+                                labels={'date': 'Date', selected_metric: metric_label(selected_metric)}
                             )
                             fig.update_layout(height=480, margin=dict(t=50, b=40))
                             st.plotly_chart(fig, use_container_width=True, theme=None)
@@ -4913,7 +4936,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                                     fill_opacity=0.0,
                                     popup=f"Latest: {latest_date.strftime('%Y-%m-%d')}"
                                 ).add_to(m_timeseries)
-                                metric_description = AVAILABLE_PARAMETERS.get(selected_metric, "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating" if selected_metric == "AFDR" else selected_metric)
+                                metric_description = metric_label(selected_metric)
                                 heatmap_layer, legend_html = create_continuous_heatmap(
                                     bounds,
                                     values_grid,
@@ -4960,15 +4983,12 @@ if not st.session_state.show_selection_map and processed_bounds:
                         if len(y_ts) > 14:
                             acf_ts = _acf_plotly(
                                 y_ts.values,
-                                title=f"ACF — {selected_metric} (AOI daily mean)",
+                                title=f"ACF — {metric_short_label(selected_metric)} (AOI daily mean)",
                                 max_lag=min(40, max(5, len(y_ts) // 3)),
                                 height=PAIR_DIAG_PLOT_HEIGHT,
                                 margin=PAIR_DIAG_PLOT_MARGIN,
                             )
-                        metric_description = AVAILABLE_PARAMETERS.get(
-                            selected_metric,
-                            "Fire Weather Index" if selected_metric == "FWI" else "Australian Fire Danger Rating"
-                        )
+                        metric_description = metric_label(selected_metric)
                         ts2a, ts2b = st.columns(2, gap="large")
                         with ts2a:
                             st.subheader("ACF")
@@ -4979,10 +4999,10 @@ if not st.session_state.show_selection_map and processed_bounds:
                         with ts2b:
                             st.subheader("Distribution")
                             time_series_values = daily_avg[selected_metric].dropna().tolist()
-                            dist_fig = create_distribution_plot(time_series_values, selected_metric, metric_description)
+                            dist_fig = create_distribution_plot(time_series_values, metric_short_label(selected_metric), metric_description)
                             if dist_fig:
                                 dist_fig.update_layout(
-                                    title=f"{selected_metric} — AOI daily mean",
+                                    title=f"{metric_short_label(selected_metric)} — AOI daily mean",
                                     height=PAIR_DIAG_PLOT_HEIGHT,
                                     margin=PAIR_DIAG_PLOT_MARGIN,
                                     autosize=True,
@@ -4994,7 +5014,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                         time_series_values = daily_avg[selected_metric].dropna().tolist()
                         if time_series_values:
                             summary_ts = [{
-                                "Series": f"{selected_metric} (AOI daily mean)",
+                                "Series": f"{metric_short_label(selected_metric)} (AOI daily mean)",
                                 "Mean": float(np.mean(time_series_values)),
                                 "Std": float(np.std(time_series_values)),
                                 "Min": float(np.min(time_series_values)),
@@ -5006,7 +5026,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                             if selected_metric == "AFDR":
                                 avg_afdr = float(np.mean(time_series_values))
                                 category, emoji = get_afdr_category(avg_afdr)
-                                st.info(f"{emoji} **Average AFDR category:** {category}")
+                                st.info(f"{emoji} **Average IWFR-FDS screening band:** {category}")
                             st.subheader("Summary statistics")
                             st.dataframe(
                                 pd.DataFrame(summary_ts).round(3),
@@ -5031,7 +5051,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                 st.download_button(
                     label="⬇️ Export Historical + Forecast CSV",
                     data=csv_str,
-                    file_name=f"{forecast_target}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
+                    file_name=f"{metric_export_name(forecast_target)}_forecast_{start_date.strftime('%Y%m%d')}_{forecast_horizon}days.csv",
                     mime="text/csv",
                     key="download_forecast_csv",
                 )
@@ -5041,6 +5061,7 @@ if not st.session_state.show_selection_map and processed_bounds:
                     "Select parameters to export",
                     options=list(AVAILABLE_PARAMETERS.keys()) + ["FWI", "AFDR"],
                     default=[selected_metric],
+                    format_func=metric_label,
                     key="export_params_regular"
                 )
                         
