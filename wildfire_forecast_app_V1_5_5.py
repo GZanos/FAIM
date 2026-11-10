@@ -551,6 +551,40 @@ def metric_export_name(name):
 
 DATA_SOURCE_QUICK_HISTORICAL = "Quick Historical Data"
 
+
+def get_nasa_sampling_grid(bounds, sampling_mode, manual_grid_points):
+    """Return geographic NASA POWER sampling coordinates, independent of map zoom.
+
+    Automatic mode preserves the application's original area-based 3/4/5 grid.
+    Manual mode sets the number of points on EACH axis (not the total points).
+    This controls API sampling only; it does not change heatmap interpolation.
+    """
+    minx, miny, maxx, maxy = bounds
+    area_size = (maxy - miny) * (maxx - minx)
+    if sampling_mode == "Manual":
+        grid_points = int(manual_grid_points)
+    elif area_size < 0.25:
+        grid_points = 5
+    elif area_size < 1.0:
+        grid_points = 4
+    else:
+        grid_points = 3
+    return (np.linspace(miny, maxy, grid_points),
+            np.linspace(minx, maxx, grid_points), grid_points)
+
+
+def show_nasa_sampling_summary(grid_points):
+    """Show the requested API point count and caution for potentially slow runs."""
+    total_points = grid_points ** 2
+    st.info(f"NASA POWER sampling: {grid_points} × {grid_points} = {total_points} geographic locations. "
+            "Map zoom and heatmap display resolution are unchanged.")
+    if total_points >= 100:
+        st.warning(f"This selection requires up to {total_points} NASA POWER point requests "
+                   "(cached requests may be reused). Large selections can take several minutes "
+                   "or encounter API rate limits. Sampling more densely than POWER's underlying "
+                   "meteorological grid does not increase its native resolution.")
+    return total_points
+
 @st.cache_data(ttl=3600)
 def fetch_nasa_power_data(lat, lon, start_date, end_date, parameters):
     """Fetch data from NASA POWER API"""
@@ -3510,6 +3544,33 @@ with st.sidebar.expander("⚙️ Configure Map Settings", expanded=True):
         help="Control zoom for both maps"
     )
     
+    # Spatial sampling is deliberately independent of map zoom.
+    nasa_sampling_mode = st.radio(
+        "NASA POWER Sampling Resolution",
+        options=["Automatic", "Manual"],
+        index=0,
+        horizontal=True,
+        key="nasa_sampling_mode",
+        help="Automatic preserves the original 3×3 / 4×4 / 5×5 area-based sampling. "
+             "Manual chooses the number of NASA POWER locations along each axis."
+    )
+    nasa_manual_grid_points = st.slider(
+        "Sampling points per axis (Manual)",
+        min_value=3,
+        max_value=20,
+        value=5,
+        step=1,
+        key="nasa_manual_grid_points",
+        disabled=(nasa_sampling_mode != "Manual"),
+        help="For example, 10 means 10×10 = 100 API sampling locations. "
+             "This is independent of map zoom and display interpolation."
+    )
+    if nasa_sampling_mode == "Manual":
+        st.caption(f"Selected sampling grid: {nasa_manual_grid_points} × "
+                   f"{nasa_manual_grid_points} = {nasa_manual_grid_points ** 2} locations")
+    else:
+        st.caption("Automatic: 3×3, 4×4, or 5×5 depending on selected area")
+
     heatmap_opacity = st.slider(
         "Heatmap Opacity",
         min_value=0.1,
@@ -4078,22 +4139,10 @@ if not st.session_state.show_selection_map and processed_bounds:
             with st.spinner("🛰️ Fetching NASA POWER data..."):
                 try:
                     minx, miny, maxx, maxy = bounds
-                    lat_range = maxy - miny
-                    lon_range = maxx - minx
-                    area_size = lat_range * lon_range
-
-                    if area_size < 0.25:
-                        grid_points = 5
-                        st.info("Small area - using high resolution (5x5 grid)")
-                    elif area_size < 1.0:
-                        grid_points = 4
-                        st.info("Medium area - using medium resolution (4x4 grid)")
-                    else:
-                        grid_points = 3
-                        st.info("Large area - using lower resolution (3x3 grid)")
-
-                    lats = np.linspace(miny, maxy, grid_points)
-                    lons = np.linspace(minx, maxx, grid_points)
+                    lats, lons, grid_points = get_nasa_sampling_grid(
+                        bounds, nasa_sampling_mode, nasa_manual_grid_points
+                    )
+                    show_nasa_sampling_summary(grid_points)
 
                     all_data = []
                     total_points = len(lats) * len(lons)
@@ -4165,19 +4214,10 @@ if not st.session_state.show_selection_map and processed_bounds:
                 with st.spinner("🛰️ Fetching NASA POWER data for forecasting..."):
                     try:
                         minx, miny, maxx, maxy = bounds
-                        lat_range = maxy - miny
-                        lon_range = maxx - minx
-                        area_size = lat_range * lon_range
-                            
-                        if area_size < 0.25:
-                            grid_points = 5
-                        elif area_size < 1.0:
-                            grid_points = 4
-                        else:
-                            grid_points = 3
-                            
-                        lats = np.linspace(miny, maxy, grid_points)
-                        lons = np.linspace(minx, maxx, grid_points)
+                        lats, lons, grid_points = get_nasa_sampling_grid(
+                            bounds, nasa_sampling_mode, nasa_manual_grid_points
+                        )
+                        show_nasa_sampling_summary(grid_points)
                             
                         all_data = []
                         total_points = len(lats) * len(lons)
