@@ -552,31 +552,55 @@ def metric_export_name(name):
 DATA_SOURCE_QUICK_HISTORICAL = "Quick Historical Data"
 
 
-def get_nasa_sampling_grid(bounds, sampling_mode, manual_grid_points):
-    """Return geographic NASA POWER sampling coordinates, independent of map zoom.
+# Approximate NASA POWER meteorological grid spacing; actual source products vary.
+NASA_NATIVE_LAT_STEP = 0.5
+NASA_NATIVE_LON_STEP = 0.625
+NASA_SAMPLING_REQUEST_BUDGET = 400
 
-    Automatic mode preserves the application's original area-based 3/4/5 grid.
-    Manual mode sets the number of points on EACH axis (not the total points).
-    This controls API sampling only; it does not change heatmap interpolation.
+
+def get_nasa_sampling_grid(bounds, sampling_mode, manual_grid_points):
+    """Return latitude/longitude API sampling coordinates, independent of map zoom.
+
+    Automatic retains the legacy area-based square grid. Native Resolution estimates
+    a rectangular grid using approximate POWER meteorological spacing, constrained
+    by a 400-request safeguard. This is NOT a guarantee of unique native grid cells.
     """
     minx, miny, maxx, maxy = bounds
-    area_size = (maxy - miny) * (maxx - minx)
-    if sampling_mode == "Manual":
-        grid_points = int(manual_grid_points)
+    lat_span = max(0.0, maxy - miny)
+    lon_span = max(0.0, maxx - minx)
+    area_size = lat_span * lon_span
+    if sampling_mode == "Native Resolution":
+        n_lat = max(2, int(np.ceil(lat_span / NASA_NATIVE_LAT_STEP)) + 1)
+        n_lon = max(2, int(np.ceil(lon_span / NASA_NATIVE_LON_STEP)) + 1)
+        # Respect the request budget without assuming a square geographic region.
+        if n_lat * n_lon > NASA_SAMPLING_REQUEST_BUDGET:
+            scale = (NASA_SAMPLING_REQUEST_BUDGET / (n_lat * n_lon)) ** 0.5
+            n_lat = max(2, int(np.floor(n_lat * scale)))
+            n_lon = max(2, int(np.floor(n_lon * scale)))
+            while n_lat * n_lon > NASA_SAMPLING_REQUEST_BUDGET:
+                if n_lat >= n_lon and n_lat > 2:
+                    n_lat -= 1
+                elif n_lon > 2:
+                    n_lon -= 1
+                else:
+                    break
+    elif sampling_mode == "Manual":
+        n_lat = n_lon = int(manual_grid_points)
     elif area_size < 0.25:
-        grid_points = 5
+        n_lat = n_lon = 5
     elif area_size < 1.0:
-        grid_points = 4
+        n_lat = n_lon = 4
     else:
-        grid_points = 3
-    return (np.linspace(miny, maxy, grid_points),
-            np.linspace(minx, maxx, grid_points), grid_points)
+        n_lat = n_lon = 3
+    return (np.linspace(miny, maxy, n_lat),
+            np.linspace(minx, maxx, n_lon), (n_lat, n_lon))
 
 
-def show_nasa_sampling_summary(grid_points):
+def show_nasa_sampling_summary(grid_shape):
     """Show the requested API point count and caution for potentially slow runs."""
-    total_points = grid_points ** 2
-    st.info(f"NASA POWER sampling: {grid_points} × {grid_points} = {total_points} geographic locations. "
+    n_lat, n_lon = grid_shape
+    total_points = n_lat * n_lon
+    st.info(f"NASA POWER sampling: {n_lat} × {n_lon} = {total_points} geographic locations. "
             "Map zoom and heatmap display resolution are unchanged.")
     if total_points >= 100:
         st.warning(f"This selection requires up to {total_points} NASA POWER point requests "
@@ -3544,16 +3568,17 @@ with st.sidebar.expander("⚙️ Configure Map Settings", expanded=True):
         help="Control zoom for both maps"
     )
     
-    # Spatial sampling is deliberately independent of map zoom.
+    # NASA POWER data sampling is independent of map zoom and heatmap rendering.
     nasa_sampling_mode = st.radio(
         "NASA POWER Sampling Resolution",
-        options=["Automatic", "Manual"],
+        options=["Automatic", "Manual", "Native Resolution"],
         index=0,
-        horizontal=True,
         key="nasa_sampling_mode",
-        help="Automatic preserves the original 3×3 / 4×4 / 5×5 area-based sampling. "
-             "Manual chooses the number of NASA POWER locations along each axis."
+        help="Automatic preserves the original area-based sampling. Manual sets a square grid. "
+             "Native Resolution estimates a rectangular grid from approximate NASA POWER "
+             "meteorological resolution, subject to a 400-request limit."
     )
+    st.caption("⚠️ More sampling points may increase processing time.")
     nasa_manual_grid_points = st.slider(
         "Sampling points per axis (Manual)",
         min_value=3,
@@ -3563,11 +3588,14 @@ with st.sidebar.expander("⚙️ Configure Map Settings", expanded=True):
         key="nasa_manual_grid_points",
         disabled=(nasa_sampling_mode != "Manual"),
         help="For example, 10 means 10×10 = 100 API sampling locations. "
-             "This is independent of map zoom and display interpolation."
+             "Independent of map zoom and display interpolation."
     )
     if nasa_sampling_mode == "Manual":
-        st.caption(f"Selected sampling grid: {nasa_manual_grid_points} × "
+        st.caption(f"Selected grid: {nasa_manual_grid_points} × "
                    f"{nasa_manual_grid_points} = {nasa_manual_grid_points ** 2} locations")
+    elif nasa_sampling_mode == "Native Resolution":
+        st.caption("Area-aware native-grid estimate (up to 400 requests). "
+                   "Exact sampling counts appear when data retrieval begins.")
     else:
         st.caption("Automatic: 3×3, 4×4, or 5×5 depending on selected area")
 
